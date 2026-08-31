@@ -1,0 +1,36 @@
+{
+  "name": "mariana",
+  "version": "1.0.0",
+  "description": "agent for consortium company",
+  "license": "ISC",
+  "author": "",
+  "type": "commonjs",
+  "main": "index.js",
+  "scripts": {
+    "build": "tsup src/server.ts --format cjs --clean",
+    "check": "ultracite check",
+    "dev": "tsx watch src/server.ts",
+    "fix": "ultracite fix",
+    "start": "node dist/server.js",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "@fastify/multipart": "^10.1.1",
+    "dotenv": "^17.4.2",
+    "drizzle-orm": "^1.0.0-rc.4",
+    "fastify": "^5.12.1",
+    "fastify-type-provider-zod": "^7.0.0",
+    "pg": "^8.23.0",
+    "postgres": "^3.4.9",
+    "zod": "^4.5.4",
+    "zod-to-json-schema": "^3.25.2"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.5.9",
+    "@types/pg": "^8.23.1",
+    "drizzle-kit": "^1.0.0-rc.4",
+    "tsup": "^8.1.12",
+    "tsx": "^4.23.13",
+    "ultracite": "^7.10.7"
+  }
+}
