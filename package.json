@@ -11,6 +11,7 @@
     "check": "ultracite check",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate",
+    "db:seed": "tsx src/db/seed.ts",
     "dev": "tsx watch src/server.ts",
     "fix": "ultracite fix",
     "start": "node dist/server.js",
