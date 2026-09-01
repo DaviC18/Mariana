@@ -1,62 +1,38 @@
-import { eq } from "drizzle-orm";
 import type { FastifyPluginCallbackZod } from "fastify-type-provider-zod";
-import z from "zod";
+
 import { db } from "../../db/connections";
 import { leads } from "../../db/schema";
 
 export const getLeads: FastifyPluginCallbackZod = (app) => {
-	app.get(
-		"/leads/:id",
-		{
-			schema: {
-				params: z.object({
-					id: z.uuid(),
-				}),
-			},
-		},
-		async (request, reply) => {
-			const starteAt = Date.now();
+	app.get("/leads", async (request, reply) => {
+		const startedAt = Date.now();
 
-			try {
-				const { id } = request.params;
+		try {
+			const result = await db.select().from(leads);
 
-				const [lead] = await db
-					.select()
-					.from(leads)
-					.where(eq(leads.id, id))
-					.limit(1);
+			const duration = Date.now() - startedAt;
 
-				const duration = Date.now() - starteAt;
+			request.log.info({
+				count: result.length,
+				duration,
+				event: "leads_fetched",
+			});
 
-				if (!lead) {
-					request.log.warn({
-						duration,
-						event: "lead_nou_found",
-						leadId: id,
-					});
-					return reply.code(401).send({ error: "Lead not found" });
-				}
+			return reply.code(200).send({
+				leads: result,
+			});
+		} catch (error) {
+			const duration = Date.now() - startedAt;
 
-				request.log.info({
-					duration,
-					event: "lead_fetched",
-					leadId: lead.id,
-				});
+			request.log.error({
+				duration,
+				error,
+				event: "leads_fetch_failed",
+			});
 
-				return reply.code(200).send({
-					lead,
-				});
-			} catch (error) {
-				const duration = Date.now() - starteAt;
-
-				request.log.error({
-					duration,
-					error,
-					event: "lead_fetch_failed",
-				});
-
-				return reply.code(500).send({ error: "Failed to fetch lead" });
-			}
+			return reply.code(500).send({
+				error: "Failed to fetch leads",
+			});
 		}
-	);
+	});
 };

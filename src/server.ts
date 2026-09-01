@@ -6,14 +6,22 @@
 import fastify from "fastify";
 import { env } from "./env";
 import { loggerConfig } from "./lib/logger";
-import type { ZodTypeProvider } from "fastify-type-provider-zod";
+import {
+	serializerCompiler,
+	validatorCompiler,
+	type ZodTypeProvider,
+} from "fastify-type-provider-zod";
 import fastifyMultipart from "@fastify/multipart";
 import { createLeads } from "./routes/leads/createLeads";
+import { getIdLeads } from "./routes/leads/getIdLeads";
 import { getLeads } from "./routes/leads/getLeads";
 
 const app = fastify({
 	logger: loggerConfig,
 }).withTypeProvider<ZodTypeProvider>();
+
+app.setValidatorCompiler(validatorCompiler);
+app.setSerializerCompiler(serializerCompiler);
 
 app.addHook("onResponse", async (request, reply) => {
 	app.log.info({
@@ -25,6 +33,7 @@ app.addHook("onResponse", async (request, reply) => {
 
 app.register(fastifyMultipart);
 app.register(createLeads);
+app.register(getIdLeads);
 app.register(getLeads);
 
 app.get("/", async (request) => {
