@@ -8,6 +8,8 @@ import { env } from "./env";
 import { loggerConfig } from "./lib/logger";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import fastifyMultipart from "@fastify/multipart";
+import { createLeads } from "./routes/leads/createLeads";
+import { getLeads } from "./routes/leads/getLeads";
 
 const app = fastify({
 	logger: loggerConfig,
@@ -22,6 +24,8 @@ app.addHook("onResponse", async (request, reply) => {
 });
 
 app.register(fastifyMultipart);
+app.register(createLeads);
+app.register(getLeads);
 
 app.get("/", async (request) => {
 	request.log.info("something");
