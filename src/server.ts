@@ -18,6 +18,9 @@ import { getLeads } from "./routes/leads/getLeads";
 import { getConversatios } from "./routes/conversations/getConversations";
 import { getIdConversations } from "./routes/conversations/getIdConversations";
 import { createConversations } from "./routes/conversations/createConversations";
+import { createMessages } from "./routes/messages/createMessages";
+import { getIdMessages } from "./routes/messages/getIdMessages";
+import { getMessages } from "./routes/messages/getMessages";
 
 const app = fastify({
 	logger: loggerConfig,
@@ -41,6 +44,9 @@ app.register(getLeads);
 app.register(getConversatios);
 app.register(getIdConversations);
 app.register(createConversations);
+app.register(createMessages);
+app.register(getIdMessages);
+app.register(getMessages);
 
 app.get("/", async (request) => {
 	request.log.info("something");
