@@ -15,6 +15,9 @@ import fastifyMultipart from "@fastify/multipart";
 import { createLeads } from "./routes/leads/createLeads";
 import { getIdLeads } from "./routes/leads/getIdLeads";
 import { getLeads } from "./routes/leads/getLeads";
+import { getConversatios } from "./routes/conversations/getConversations";
+import { getIdConversations } from "./routes/conversations/getIdConversations";
+import { createConversations } from "./routes/conversations/createConversations";
 
 const app = fastify({
 	logger: loggerConfig,
@@ -35,6 +38,9 @@ app.register(fastifyMultipart);
 app.register(createLeads);
 app.register(getIdLeads);
 app.register(getLeads);
+app.register(getConversatios);
+app.register(getIdConversations);
+app.register(createConversations);
 
 app.get("/", async (request) => {
 	request.log.info("something");
