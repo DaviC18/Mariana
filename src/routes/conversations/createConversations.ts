@@ -1,6 +1,6 @@
 /** biome-ignore-all lint/style/useFilenamingConvention: <> */
 
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import type { FastifyPluginCallbackZod } from "fastify-type-provider-zod";
 import { z } from "zod";
 import { db } from "../../db/connections";
@@ -40,6 +40,16 @@ export const createConversations: FastifyPluginCallbackZod = (app) => {
 
 					return reply.code(404).send({ error: "Lead not found" });
 				}
+				const [activeConversation] = await db
+					.select()
+					.from(conversations)
+					.where(
+						and(
+							eq(conversations.leadId, leadId),
+							eq(conversations.status, "active")
+						)
+					)
+					.limit(1);
 
 				const [conversation] = await db
 					.insert(conversations)
@@ -58,6 +68,7 @@ export const createConversations: FastifyPluginCallbackZod = (app) => {
 				});
 
 				return reply.code(201).send({
+					activeConversation,
 					conversation,
 				});
 			} catch (error) {

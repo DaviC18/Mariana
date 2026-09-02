@@ -54,6 +54,13 @@ export const createMessages: FastifyPluginCallbackZod = (app) => {
 					})
 					.returning();
 
+				await db
+					.update(conversations)
+					.set({
+						updatedAt: new Date(),
+					})
+					.where(eq(conversations.id, conversationId));
+
 				const duration = Date.now() - startedAt;
 
 				request.log.info({
