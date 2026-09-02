@@ -1,8 +1,8 @@
 import { eq } from "drizzle-orm";
 import type { FastifyPluginCallbackZod } from "fastify-type-provider-zod";
 import z from "zod";
-import { db } from "../../../db/connections";
-import { messages } from "../../../db/schema";
+import { db } from "../../db/connections";
+import { messages } from "../../db/schema";
 
 export const getIdMessages: FastifyPluginCallbackZod = (app) => {
 	app.get(

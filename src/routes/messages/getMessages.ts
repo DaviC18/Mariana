@@ -1,7 +1,7 @@
 import { asc } from "drizzle-orm";
 import type { FastifyPluginCallbackZod } from "fastify-type-provider-zod";
-import { db } from "../../../db/connections";
-import { messages } from "../../../db/schema";
+import { db } from "../../db/connections";
+import { messages } from "../../db/schema";
 
 export const getMessages: FastifyPluginCallbackZod = (app) => {
 	app.get("/messages", async (request, reply) => {
