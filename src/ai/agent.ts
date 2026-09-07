@@ -1,28 +1,69 @@
 /** biome-ignore-all lint/style/useFilenamingConvention: <> */
 /** biome-ignore-all lint/style/useDestructuring: <> */
 
+import type { GenerateContentResponse } from "@google/genai";
+import { z } from "zod";
+
 import { ai } from "./client";
 import { MARIANA_SYSTEM_PROMPT } from "./prompt";
-import type { GenerateMarianaResponseParams } from "./types";
+import {
+	type MarianaResponse,
+	marianaResponseSchema,
+} from "./schemas/mariana-response-schema";
 
-const MODEL = "gemini-3.5-flash";
+const MODEL = "gemini-3.6-flash";
+const CODE_FENCE_START = /^```(?:json)?\s*/i;
+const CODE_FENCE_END = /\s*```$/i;
 
-export async function generateMarianaResponse({
+export interface MarianaMessage {
+	content: string;
+	createdAt: Date;
+	role: "user" | "assistant" | "system";
+}
+
+export interface MarianaLead {
+	consortiumType: string;
+	name: string;
+	objective: string;
+	phone: string;
+	status: string;
+}
+
+export interface GenerateMarianaReplyParams {
+	lead: MarianaLead;
+	messages: MarianaMessage[];
+}
+
+export interface GenerateMarianaReplyResult {
+	metadata: {
+		latencyMs: number;
+		model: string;
+		usage: GenerateContentResponse["usageMetadata"] | null;
+	};
+	result: MarianaResponse;
+}
+
+export async function generateMarianaReply({
 	lead,
 	messages,
-	currentMessage,
-}: GenerateMarianaResponseParams): Promise<string> {
-	const history = messages
-		.filter(
-			(message) => message.role === "user" || message.role === "assistant"
-		)
+}: GenerateMarianaReplyParams): Promise<GenerateMarianaReplyResult> {
+	const startedAt = Date.now();
+
+	const contents = messages
+		.filter((message) => message.role !== "system")
 		.map((message) => ({
-			parts: [{ text: message.content }],
+			parts: [
+				{
+					text: message.content,
+				},
+			],
 			role: message.role === "assistant" ? "model" : "user",
 		}));
 
-	const leadContext = `
-Contexto do lead:
+	const contextualSystemPrompt = `
+${MARIANA_SYSTEM_PROMPT}
+
+# CONTEXTO ATUAL DO LEAD
 
 Nome: ${lead.name}
 Objetivo: ${lead.objective}
@@ -32,32 +73,39 @@ Status: ${lead.status}
 
 	const response = await ai.models.generateContent({
 		config: {
-			systemInstruction: MARIANA_SYSTEM_PROMPT,
-			temperature: 0.3,
+			responseJsonSchema: z.toJSONSchema(marianaResponseSchema),
+			responseMimeType: "application/json",
+			systemInstruction: contextualSystemPrompt,
 		},
-		contents: [
-			{
-				parts: [
-					{
-						text: leadContext,
-					},
-				],
-				role: "user",
-			},
-			...history,
-			{
-				parts: [{ text: currentMessage }],
-				role: "user",
-			},
-		],
+		contents,
 		model: MODEL,
 	});
 
-	const text = response.text;
-
-	if (!text) {
+	const rawText = response.text;
+	if (!rawText) {
 		throw new Error("Gemini returned an empty response");
 	}
 
-	return text;
+	let parsed: unknown;
+	const normalizedText = rawText.trim();
+	const jsonCandidate = normalizedText.startsWith("```")
+		? normalizedText.replace(CODE_FENCE_START, "").replace(CODE_FENCE_END, "")
+		: normalizedText;
+
+	try {
+		parsed = JSON.parse(jsonCandidate);
+	} catch (error) {
+		throw new Error("Gemini response was not valid JSON", { cause: error });
+	}
+
+	const result = marianaResponseSchema.parse(parsed);
+
+	return {
+		metadata: {
+			latencyMs: Date.now() - startedAt,
+			model: response.modelVersion ?? MODEL,
+			usage: response.usageMetadata ?? null,
+		},
+		result,
+	};
 }

@@ -3,9 +3,9 @@
 import { and, eq } from "drizzle-orm";
 import type { FastifyPluginCallbackZod } from "fastify-type-provider-zod";
 import { z } from "zod";
+
 import { db } from "../../db/connections";
-import { leads } from "../../db/schema";
-import { conversations } from "./../../db/schema/conversations";
+import { conversations, leads } from "../../db/schema";
 
 export const createConversations: FastifyPluginCallbackZod = (app) => {
 	app.post(
@@ -18,7 +18,7 @@ export const createConversations: FastifyPluginCallbackZod = (app) => {
 			},
 		},
 		async (request, reply) => {
-			const starteAt = Date.now();
+			const startedAt = Date.now();
 
 			try {
 				const { leadId } = request.body;
@@ -30,7 +30,7 @@ export const createConversations: FastifyPluginCallbackZod = (app) => {
 					.limit(1);
 
 				if (!lead) {
-					const duration = Date.now() - starteAt;
+					const duration = Date.now() - startedAt;
 
 					request.log.warn({
 						duration,
@@ -38,8 +38,11 @@ export const createConversations: FastifyPluginCallbackZod = (app) => {
 						leadId,
 					});
 
-					return reply.code(404).send({ error: "Lead not found" });
+					return reply.code(404).send({
+						error: "Lead not found",
+					});
 				}
+
 				const [activeConversation] = await db
 					.select()
 					.from(conversations)
@@ -51,6 +54,21 @@ export const createConversations: FastifyPluginCallbackZod = (app) => {
 					)
 					.limit(1);
 
+				if (activeConversation) {
+					const duration = Date.now() - startedAt;
+
+					request.log.info({
+						conversationId: activeConversation.id,
+						duration,
+						event: "conversation_already_active",
+						leadId: activeConversation.leadId,
+					});
+
+					return reply.code(200).send({
+						conversation: activeConversation,
+					});
+				}
+
 				const [conversation] = await db
 					.insert(conversations)
 					.values({
@@ -58,21 +76,20 @@ export const createConversations: FastifyPluginCallbackZod = (app) => {
 					})
 					.returning();
 
-				const duration = Date.now() - starteAt;
+				const duration = Date.now() - startedAt;
 
 				request.log.info({
-					conversationId: conversations.id,
+					conversationId: conversation.id,
 					duration,
 					event: "conversation_created",
-					leadId: leads.id,
+					leadId: conversation.leadId,
 				});
 
 				return reply.code(201).send({
-					activeConversation,
 					conversation,
 				});
 			} catch (error) {
-				const duration = Date.now() - starteAt;
+				const duration = Date.now() - startedAt;
 
 				request.log.error({
 					duration,

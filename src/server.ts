@@ -12,19 +12,22 @@ import {
 	type ZodTypeProvider,
 } from "fastify-type-provider-zod";
 import fastifyMultipart from "@fastify/multipart";
-import { createLeads } from "./routes/leads/createLeads";
-import { getIdLeads } from "./routes/leads/getIdLeads";
-import { getLeads } from "./routes/leads/getLeads";
-import { getConversatios } from "./routes/conversations/getConversations";
-import { getIdConversations } from "./routes/conversations/getIdConversations";
-import { createConversations } from "./routes/conversations/createConversations";
-import { createMessages } from "./routes//messages/createMessages";
-import { getIdMessages } from "./routes//messages/getIdMessages";
-import { getMessages } from "./routes//messages/getMessages";
-import { getConversationMessages } from "./routes//messages/getConversationMessages";
-import { createAppointments } from "./routes/appointments/createAppointments";
-import { getIdAppointments } from "./routes/appointments/getIdAppointments";
-import { getAppointments } from "./routes/appointments/getAppointments";
+import { createAppointments } from "./routes/appointments/create-appointments";
+import { getAppointments } from "./routes/appointments/get-appointments";
+import { getIdAppointments } from "./routes/appointments/get-id-appointments";
+
+import { createConversations } from "./routes/conversations/create-conversations";
+import { getIdConversations } from "./routes/conversations/get-id-conversations";
+
+import { createLeads } from "./routes/leads/create-leads";
+import { getIdLeads } from "./routes/leads/get-id-leads";
+import { getLeads } from "./routes/leads/get-leads";
+
+import { createMessages } from "./routes/messages/create-messages";
+import { getConversationMessages } from "./routes/messages/get-conversation-messages";
+import { getIdMessages } from "./routes/messages/get-id-messages";
+import { getMessages } from "./routes/messages/get-messages";
+import { getConversatios } from "./routes/conversations/get-conversations";
 
 const app = fastify({
 	logger: loggerConfig,
