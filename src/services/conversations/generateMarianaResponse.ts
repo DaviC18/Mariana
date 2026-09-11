@@ -7,17 +7,25 @@ import {
 	generateMarianaReply,
 } from "../../ai/agent";
 import { db } from "../../db/connections";
-import { conversations, leads, messages } from "../../db/schema";
+import { appointments, conversations, leads, messages } from "../../db/schema";
+import { executeNextAction } from "../agent/execute-next-action";
+import { updateLeadFromAgent } from "../leads/update-lead-from-agent";
 
 export interface GenerateMarianaResponseParams {
 	currentMessage: string;
 	leadId: string;
 }
 
+export interface GenerateMarianaResponseResult {
+	actionResult: Awaited<ReturnType<typeof executeNextAction>>;
+	metadata: GenerateMarianaReplyResult["metadata"];
+	result: GenerateMarianaReplyResult["result"];
+}
+
 export async function generateMarianaResponse({
 	leadId,
 	currentMessage,
-}: GenerateMarianaResponseParams): Promise<GenerateMarianaReplyResult> {
+}: GenerateMarianaResponseParams): Promise<GenerateMarianaResponseResult> {
 	// 1. Busca o lead
 	const [lead] = await db
 		.select()
@@ -78,8 +86,72 @@ export async function generateMarianaResponse({
 		messages: agentMessages,
 	});
 
-	// 8. Salva resposta da Mariana
-	await db.transaction(async (tx) => {
+	// 8. Valida regra de negócio antes de persistir qualquer mudança de status
+	const [existingAppointment] = await db
+		.select({ id: appointments.id })
+		.from(appointments)
+		.where(eq(appointments.leadId, leadId))
+		.limit(1);
+
+	const appointmentCreated = Boolean(existingAppointment);
+
+	// 9. Salva resposta da Mariana e aplica a atualização do lead apenas se a transição for permitida
+	const actionResult = await db.transaction(async (tx) => {
+		await updateLeadFromAgent({
+			appointmentCreated,
+			currentStatus: lead.status,
+			leadId,
+			leadUpdate: response.result.leadUpdate,
+			persistLead: async ({ leadId: targetLeadId, values }) => {
+				const [updatedLead] = await tx
+					.update(leads)
+					.set({
+						...(values.consortiumType === undefined
+							? {}
+							: { consortiumType: values.consortiumType }),
+						...(values.objective === undefined
+							? {}
+							: { objective: values.objective }),
+						status: values.status,
+						updatedAt: values.updatedAt,
+					})
+					.where(eq(leads.id, targetLeadId))
+					.returning();
+
+				if (!updatedLead) {
+					throw new Error("Lead not found");
+				}
+
+				return updatedLead;
+			},
+		});
+
+		const nextActionResult = await executeNextAction({
+			conversationId: activeConversation.id,
+			leadId,
+			nextAction: response.result.nextAction,
+			persistConversationStatus: async ({
+				conversationId: targetConversationId,
+				status,
+				updatedAt,
+			}) => {
+				const [updatedConversation] = await tx
+					.update(conversations)
+					.set({
+						status,
+						updatedAt,
+					})
+					.where(eq(conversations.id, targetConversationId))
+					.returning();
+
+				if (!updatedConversation) {
+					throw new Error("Conversation not found");
+				}
+
+				return updatedConversation;
+			},
+		});
+
 		await tx.insert(messages).values({
 			content: response.result.reply,
 			conversationId: activeConversation.id,
@@ -92,7 +164,13 @@ export async function generateMarianaResponse({
 				updatedAt: new Date(),
 			})
 			.where(eq(conversations.id, activeConversation.id));
+
+		return nextActionResult;
 	});
 
-	return response;
+	return {
+		actionResult,
+		metadata: response.metadata,
+		result: response.result,
+	};
 }

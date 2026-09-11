@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { marianaResponseSchema } from "./schemas/mariana-response-schema";
+import { marianaResponseSchema } from "../ai/schemas/mariana-response-schema";
 
 test("CASO 1 — resposta válida", () => {
 	const payload = {

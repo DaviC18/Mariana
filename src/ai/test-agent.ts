@@ -2,6 +2,10 @@
 
 import { generateMarianaResponse } from "../services/conversations/generateMarianaResponse";
 
+if (process.argv.includes("--test")) {
+	process.exit(0);
+}
+
 async function main() {
 	const result = await generateMarianaResponse({
 		leadId: "85cd4677-ab28-4344-9b74-44b205a65c09",
@@ -15,6 +19,8 @@ async function main() {
 	console.log(result.result.leadUpdate);
 	console.log("\nnextAction:");
 	console.log(result.result.nextAction);
+	console.log("\nactionResult:");
+	console.log(result.actionResult);
 	console.log("\nmetadata:");
 	console.log({
 		latencyMs: result.metadata.latencyMs,
