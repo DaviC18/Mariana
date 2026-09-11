@@ -22,11 +22,14 @@ export interface MarianaMessage {
 }
 
 export interface MarianaLead {
+	commercialApproach: string | null;
 	consortiumType: string;
+	currentSituation: string | null;
 	name: string;
 	objective: string;
-	phone: string;
+	painPoint: string | null;
 	status: string;
+	urgency: string | null;
 }
 
 export interface GenerateMarianaReplyParams {
@@ -68,6 +71,10 @@ ${MARIANA_SYSTEM_PROMPT}
 Nome: ${lead.name}
 Objetivo: ${lead.objective}
 Tipo de consórcio: ${lead.consortiumType}
+Ponto de dor: ${lead.painPoint ?? "não informado"}
+Urgência: ${lead.urgency ?? "não informada"}
+Situação atual: ${lead.currentSituation ?? "não informada"}
+Abordagem comercial: ${lead.commercialApproach ?? "não informada"}
 Status: ${lead.status}
 `;
 

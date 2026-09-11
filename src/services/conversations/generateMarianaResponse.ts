@@ -116,11 +116,14 @@ export async function generateMarianaResponse({
 
 	// 5. Contexto do lead
 	const agentLead = {
+		commercialApproach: lead.commercialApproach,
 		consortiumType: lead.consortiumType,
+		currentSituation: lead.currentSituation,
 		name: lead.name,
 		objective: lead.objective,
-		phone: lead.phone,
+		painPoint: lead.painPoint,
 		status: lead.status,
+		urgency: lead.urgency,
 	};
 
 	// 6. Converte histórico
@@ -150,6 +153,12 @@ export async function generateMarianaResponse({
 		await updateLeadFromAgent({
 			appointmentCreated,
 			currentStatus: lead.status,
+			existingLead: {
+				consortiumType: lead.consortiumType,
+				currentSituation: lead.currentSituation,
+				objective: lead.objective,
+				painPoint: lead.painPoint,
+			},
 			leadId,
 			leadUpdate: response.result.leadUpdate,
 			persistLead: async ({ leadId: targetLeadId, values }) =>

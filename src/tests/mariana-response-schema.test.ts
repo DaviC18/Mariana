@@ -58,3 +58,18 @@ test("CASO 4 — reply vazia", () => {
 
 	assert.throws(() => marianaResponseSchema.parse(payload));
 });
+
+test("interestedInConsultant aceita true, false ou ausência", () => {
+	for (const interestedInConsultant of [true, false, undefined]) {
+		const payload = {
+			leadUpdate: {
+				interestedInConsultant,
+				status: "qualifying",
+			},
+			nextAction: "continue_qualification",
+			reply: "Vou entender melhor o seu objetivo.",
+		};
+
+		assert.doesNotThrow(() => marianaResponseSchema.parse(payload));
+	}
+});

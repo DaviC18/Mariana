@@ -27,6 +27,13 @@ const VALID_COMMERCIAL_APPROACHES = [
 export interface UpdateLeadFromAgentInput {
 	appointmentCreated?: boolean;
 	currentStatus: string;
+	existingLead?: {
+		consortiumType?: string | null;
+		currentSituation?: string | null;
+		motivation?: string | null;
+		objective?: string | null;
+		painPoint?: string | null;
+	};
 	interestedInConsultant?: boolean | null;
 	leadId: string;
 	leadUpdate: {
@@ -64,21 +71,29 @@ export type PersistLeadFn = (
 
 function buildQualifiedCandidate(
 	leadUpdate: UpdateLeadFromAgentInput["leadUpdate"],
+	existingLead?: UpdateLeadFromAgentInput["existingLead"],
 	interestedInConsultant?: boolean | null
 ) {
 	const effectiveInterestedInConsultant =
-		leadUpdate.interestedInConsultant ??
-		interestedInConsultant ??
-		(leadUpdate.status === "qualified" ? true : undefined);
+		leadUpdate.interestedInConsultant ?? interestedInConsultant;
 
 	return {
-		consortiumType: normalizeText(leadUpdate.consortiumType ?? undefined),
-		currentSituation: normalizeText(leadUpdate.currentSituation ?? undefined),
+		consortiumType: normalizeText(
+			leadUpdate.consortiumType ?? existingLead?.consortiumType
+		),
+		currentSituation: normalizeText(
+			leadUpdate.currentSituation ?? existingLead?.currentSituation
+		),
 		interestedInConsultant: effectiveInterestedInConsultant,
-		motivation: normalizeText(leadUpdate.motivation ?? undefined),
-		objective: normalizeText(leadUpdate.objective ?? undefined),
+		motivation: normalizeText(
+			leadUpdate.motivation ?? existingLead?.motivation
+		),
+		objective: normalizeText(leadUpdate.objective ?? existingLead?.objective),
 		painPoint: normalizeText(
-			leadUpdate.painPoint ?? leadUpdate.motivation ?? undefined
+			leadUpdate.painPoint ??
+				leadUpdate.motivation ??
+				existingLead?.painPoint ??
+				existingLead?.motivation
 		),
 	};
 }
@@ -236,6 +251,7 @@ async function defaultPersistLead({
 export async function updateLeadFromAgent({
 	appointmentCreated = false,
 	currentStatus,
+	existingLead,
 	interestedInConsultant,
 	leadId,
 	leadUpdate,
@@ -264,6 +280,7 @@ export async function updateLeadFromAgent({
 
 	const qualifiedCandidate = buildQualifiedCandidate(
 		leadUpdate,
+		existingLead,
 		interestedInConsultant
 	);
 

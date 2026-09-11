@@ -169,6 +169,125 @@ test("lead com todos os requisitos pode ser qualified", () => {
 	);
 });
 
+test("updateLeadFromAgent rejeita qualified sem interesse explícito", async () => {
+	const createQualificationAttempt = (
+		interestedInConsultant: boolean | undefined
+	) =>
+		updateLeadFromAgent({
+			currentStatus: "qualifying",
+			leadId: "lead-explicit-interest",
+			leadUpdate: {
+				consortiumType: "Veículo",
+				currentSituation: "Uso carro antigo",
+				interestedInConsultant,
+				objective: "Comprar um carro",
+				painPoint: "Quero reduzir custos",
+				status: "qualified",
+			},
+		});
+
+	await Promise.all([
+		assert.rejects(createQualificationAttempt(undefined), {
+			message:
+				"Lead cannot be qualified without objective, consortiumType, painPoint or motivation, currentSituation, and explicit interest in consultant",
+		}),
+		assert.rejects(createQualificationAttempt(false), {
+			message:
+				"Lead cannot be qualified without objective, consortiumType, painPoint or motivation, currentSituation, and explicit interest in consultant",
+		}),
+	]);
+});
+
+test("updateLeadFromAgent aceita qualified com interesse explícito e requisitos completos", async () => {
+	await assert.doesNotReject(() =>
+		updateLeadFromAgent({
+			currentStatus: "qualifying",
+			leadId: "lead-explicit-interest-true",
+			leadUpdate: {
+				consortiumType: "Veículo",
+				currentSituation: "Uso carro antigo",
+				interestedInConsultant: true,
+				objective: "Comprar um carro",
+				painPoint: "Quero reduzir custos",
+				status: "qualified",
+			},
+			persistLead: ({ leadId }) => Promise.resolve({ id: leadId }),
+		})
+	);
+});
+
+test("qualificação combina dados existentes com dados novos", async () => {
+	await assert.doesNotReject(() =>
+		updateLeadFromAgent({
+			currentStatus: "qualifying",
+			existingLead: {
+				consortiumType: "Veículo",
+				objective: "Comprar um carro",
+			},
+			leadId: "lead-existing-core",
+			leadUpdate: {
+				currentSituation: "Uso carro antigo",
+				interestedInConsultant: true,
+				painPoint: "Quero reduzir custos",
+				status: "qualified",
+			},
+			persistLead: ({ leadId }) => Promise.resolve({ id: leadId }),
+		})
+	);
+});
+
+test("qualificação preserva requisitos existentes ao receber null", async () => {
+	let persistedValues: Record<string, unknown> | undefined;
+
+	await updateLeadFromAgent({
+		currentStatus: "qualifying",
+		existingLead: {
+			consortiumType: "Veículo",
+			currentSituation: "Uso carro antigo",
+			objective: "Comprar um carro",
+			painPoint: "Quero reduzir custos",
+		},
+		leadId: "lead-preserve-existing",
+		leadUpdate: {
+			consortiumType: null,
+			currentSituation: null,
+			interestedInConsultant: true,
+			objective: null,
+			painPoint: null,
+			status: "qualified",
+		},
+		persistLead: ({ leadId, values }) => {
+			persistedValues = values;
+			return Promise.resolve({ id: leadId });
+		},
+	});
+
+	assert.equal("consortiumType" in (persistedValues ?? {}), false);
+	assert.equal("currentSituation" in (persistedValues ?? {}), false);
+	assert.equal("objective" in (persistedValues ?? {}), false);
+	assert.equal("painPoint" in (persistedValues ?? {}), false);
+});
+
+test("painPoint e currentSituation existentes continuam válidos com dados complementares", async () => {
+	await assert.doesNotReject(() =>
+		updateLeadFromAgent({
+			currentStatus: "qualifying",
+			existingLead: {
+				consortiumType: "Veículo",
+				currentSituation: "Uso carro antigo",
+				objective: "Comprar um carro",
+				painPoint: "Quero reduzir custos",
+			},
+			leadId: "lead-existing-commercial-data",
+			leadUpdate: {
+				interestedInConsultant: true,
+				status: "qualified",
+			},
+			persistLead: ({ leadId }) => Promise.resolve({ id: leadId }),
+		})
+	);
+});
+
 test("qualifiedAt é preenchido quando ocorre a promoção real", async () => {
 	let persisted: { leadId: string; values: Record<string, unknown> } | null =
 		null;
