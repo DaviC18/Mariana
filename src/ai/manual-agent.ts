@@ -1,8 +1,15 @@
 /** biome-ignore-all assist/source/useSortedKeys: <> */
 
+import { fileURLToPath } from "node:url";
+
 import { generateMarianaResponse } from "../services/conversations/generateMarianaResponse";
 
-if (process.argv.includes("--test")) {
+const currentScriptPath = fileURLToPath(import.meta.url);
+const invokedScriptPath = process.argv[1]
+	? fileURLToPath(new URL(process.argv[1], "file://"))
+	: undefined;
+
+if (invokedScriptPath !== currentScriptPath) {
 	process.exit(0);
 }
 

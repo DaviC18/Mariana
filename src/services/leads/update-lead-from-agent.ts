@@ -4,25 +4,56 @@ import { eq } from "drizzle-orm";
 
 import { db } from "../../db/connections";
 import { leads } from "../../db/schema";
+import { isLeadQualified } from "./lead-qualification";
 import { canTransitionLeadStatus, type LeadStatus } from "./lead-status";
+
+const VALID_URGENCIES = [
+	"immediate",
+	"short_term",
+	"medium_term",
+	"long_term",
+] as const;
+
+const VALID_COMMERCIAL_APPROACHES = [
+	"vehicle_renewal",
+	"operational_cost",
+	"cash_purchase_power",
+	"investment_discipline",
+	"quota_bank",
+	"fleet",
+	"general",
+] as const;
 
 export interface UpdateLeadFromAgentInput {
 	appointmentCreated?: boolean;
 	currentStatus: string;
+	interestedInConsultant?: boolean | null;
 	leadId: string;
 	leadUpdate: {
+		commercialApproach?: string | null;
 		consortiumType?: string | null;
+		currentSituation?: string | null;
+		interestedInConsultant?: boolean | null;
+		motivation?: string | null;
 		objective?: string | null;
+		painPoint?: string | null;
 		status: string;
+		urgency?: string | null;
 	};
+	qualifiedAt?: Date;
 }
 
 interface PersistLeadInput {
 	leadId: string;
 	values: {
+		commercialApproach?: (typeof VALID_COMMERCIAL_APPROACHES)[number];
 		consortiumType?: string;
+		currentSituation?: string;
 		objective?: string;
+		painPoint?: string;
+		qualifiedAt?: Date;
 		status: LeadStatus;
+		urgency?: (typeof VALID_URGENCIES)[number];
 		updatedAt: Date;
 	};
 }
@@ -30,6 +61,127 @@ interface PersistLeadInput {
 export type PersistLeadFn = (
 	input: PersistLeadInput
 ) => Promise<{ id: string }>;
+
+function buildQualifiedCandidate(
+	leadUpdate: UpdateLeadFromAgentInput["leadUpdate"],
+	interestedInConsultant?: boolean | null
+) {
+	const effectiveInterestedInConsultant =
+		leadUpdate.interestedInConsultant ??
+		interestedInConsultant ??
+		(leadUpdate.status === "qualified" ? true : undefined);
+
+	return {
+		consortiumType: normalizeText(leadUpdate.consortiumType ?? undefined),
+		currentSituation: normalizeText(leadUpdate.currentSituation ?? undefined),
+		interestedInConsultant: effectiveInterestedInConsultant,
+		motivation: normalizeText(leadUpdate.motivation ?? undefined),
+		objective: normalizeText(leadUpdate.objective ?? undefined),
+		painPoint: normalizeText(
+			leadUpdate.painPoint ?? leadUpdate.motivation ?? undefined
+		),
+	};
+}
+
+function applyNormalizedLeadValues(
+	values: PersistLeadInput["values"],
+	leadUpdate: UpdateLeadFromAgentInput["leadUpdate"]
+) {
+	if (
+		leadUpdate.consortiumType !== null &&
+		leadUpdate.consortiumType !== undefined
+	) {
+		const trimmedConsortiumType = normalizeText(leadUpdate.consortiumType);
+		if (trimmedConsortiumType) {
+			values.consortiumType = trimmedConsortiumType;
+		}
+	}
+
+	if (leadUpdate.objective !== null && leadUpdate.objective !== undefined) {
+		const trimmedObjective = normalizeText(leadUpdate.objective);
+		if (trimmedObjective) {
+			values.objective = trimmedObjective;
+		}
+	}
+
+	const normalizedPainPoint = normalizeText(
+		leadUpdate.painPoint ?? leadUpdate.motivation ?? undefined
+	);
+	if (normalizedPainPoint) {
+		values.painPoint = normalizedPainPoint;
+	}
+
+	const normalizedCurrentSituation = normalizeText(leadUpdate.currentSituation);
+	if (normalizedCurrentSituation) {
+		values.currentSituation = normalizedCurrentSituation;
+	}
+
+	const normalizedUrgency = validateControlledValue(
+		leadUpdate.urgency,
+		VALID_URGENCIES
+	);
+	if (normalizedUrgency) {
+		values.urgency = normalizedUrgency;
+	}
+
+	const normalizedCommercialApproach = validateControlledValue(
+		leadUpdate.commercialApproach,
+		VALID_COMMERCIAL_APPROACHES
+	);
+	if (normalizedCommercialApproach) {
+		values.commercialApproach = normalizedCommercialApproach;
+	}
+}
+
+function resolveQualifiedAtValue({
+	currentStatus,
+	normalizedStatus,
+	qualifiedAt,
+}: {
+	currentStatus: string;
+	normalizedStatus: LeadStatus;
+	qualifiedAt?: Date;
+}) {
+	if (
+		normalizedStatus === "qualified" &&
+		currentStatus !== "qualified" &&
+		!qualifiedAt
+	) {
+		return new Date();
+	}
+
+	if (normalizedStatus === "qualified" && currentStatus !== "qualified") {
+		return qualifiedAt ?? new Date();
+	}
+
+	if (currentStatus === "qualified" && qualifiedAt) {
+		return qualifiedAt;
+	}
+}
+
+function normalizeText(value: string | null | undefined): string | undefined {
+	if (value === null || value === undefined) {
+		return undefined;
+	}
+
+	const trimmedValue = value.trim();
+	return trimmedValue.length > 0 ? trimmedValue : undefined;
+}
+
+function validateControlledValue<T extends readonly string[]>(
+	value: string | null | undefined,
+	allowedValues: T
+): T[number] | undefined {
+	if (value === null || value === undefined) {
+		return undefined;
+	}
+
+	if (!allowedValues.includes(value as T[number])) {
+		throw new Error(`Invalid value: ${value}`);
+	}
+
+	return value as T[number];
+}
 
 async function defaultPersistLead({
 	leadId,
@@ -48,6 +200,26 @@ async function defaultPersistLead({
 		updatePayload.objective = values.objective;
 	}
 
+	if (values.painPoint !== undefined) {
+		updatePayload.painPoint = values.painPoint;
+	}
+
+	if (values.currentSituation !== undefined) {
+		updatePayload.currentSituation = values.currentSituation;
+	}
+
+	if (values.urgency !== undefined) {
+		updatePayload.urgency = values.urgency;
+	}
+
+	if (values.commercialApproach !== undefined) {
+		updatePayload.commercialApproach = values.commercialApproach;
+	}
+
+	if (values.qualifiedAt !== undefined) {
+		updatePayload.qualifiedAt = values.qualifiedAt;
+	}
+
 	const [updatedLead] = await db
 		.update(leads)
 		.set(updatePayload)
@@ -64,9 +236,11 @@ async function defaultPersistLead({
 export async function updateLeadFromAgent({
 	appointmentCreated = false,
 	currentStatus,
+	interestedInConsultant,
 	leadId,
 	leadUpdate,
 	persistLead = defaultPersistLead,
+	qualifiedAt,
 }: UpdateLeadFromAgentInput & {
 	persistLead?: PersistLeadFn;
 }): Promise<{ id: string }> {
@@ -88,21 +262,29 @@ export async function updateLeadFromAgent({
 		updatedAt: new Date(),
 	};
 
+	const qualifiedCandidate = buildQualifiedCandidate(
+		leadUpdate,
+		interestedInConsultant
+	);
+
 	if (
-		leadUpdate.consortiumType !== null &&
-		leadUpdate.consortiumType !== undefined
+		normalizedStatus === "qualified" &&
+		!isLeadQualified(qualifiedCandidate)
 	) {
-		const trimmedConsortiumType = leadUpdate.consortiumType.trim();
-		if (trimmedConsortiumType.length > 0) {
-			values.consortiumType = trimmedConsortiumType;
-		}
+		throw new Error(
+			"Lead cannot be qualified without objective, consortiumType, painPoint or motivation, currentSituation, and explicit interest in consultant"
+		);
 	}
 
-	if (leadUpdate.objective !== null && leadUpdate.objective !== undefined) {
-		const trimmedObjective = leadUpdate.objective.trim();
-		if (trimmedObjective.length > 0) {
-			values.objective = trimmedObjective;
-		}
+	applyNormalizedLeadValues(values, leadUpdate);
+
+	const resolvedQualifiedAt = resolveQualifiedAtValue({
+		currentStatus,
+		normalizedStatus,
+		qualifiedAt,
+	});
+	if (resolvedQualifiedAt) {
+		values.qualifiedAt = resolvedQualifiedAt;
 	}
 
 	return await persistLead({ leadId, values });

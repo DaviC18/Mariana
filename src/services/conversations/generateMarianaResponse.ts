@@ -1,5 +1,6 @@
 /** biome-ignore-all lint/style/useFilenamingConvention: <> */
 
+import type { InferInsertModel } from "drizzle-orm";
 import { and, asc, eq } from "drizzle-orm";
 
 import {
@@ -9,7 +10,12 @@ import {
 import { db } from "../../db/connections";
 import { appointments, conversations, leads, messages } from "../../db/schema";
 import { executeNextAction } from "../agent/execute-next-action";
+import type { LeadStatus } from "../leads/lead-status";
 import { updateLeadFromAgent } from "../leads/update-lead-from-agent";
+
+type PersistLeadTransactionValues = Partial<InferInsertModel<typeof leads>> & {
+	updatedAt: Date;
+};
 
 export interface GenerateMarianaResponseParams {
 	currentMessage: string;
@@ -20,6 +26,50 @@ export interface GenerateMarianaResponseResult {
 	actionResult: Awaited<ReturnType<typeof executeNextAction>>;
 	metadata: GenerateMarianaReplyResult["metadata"];
 	result: GenerateMarianaReplyResult["result"];
+}
+
+async function persistLeadUpdate({
+	leadId,
+	values,
+	tx,
+}: {
+	leadId: string;
+	values: PersistLeadTransactionValues & { status: LeadStatus };
+	tx: Parameters<Parameters<typeof db.transaction>[0]>[0];
+}) {
+	const [updatedLead] = await tx
+		.update(leads)
+		.set({
+			...(values.commercialApproach === undefined
+				? {}
+				: { commercialApproach: values.commercialApproach }),
+			...(values.consortiumType === undefined
+				? {}
+				: { consortiumType: values.consortiumType }),
+			...(values.currentSituation === undefined
+				? {}
+				: { currentSituation: values.currentSituation }),
+			...(values.objective === undefined
+				? {}
+				: { objective: values.objective }),
+			...(values.painPoint === undefined
+				? {}
+				: { painPoint: values.painPoint }),
+			...(values.qualifiedAt === undefined
+				? {}
+				: { qualifiedAt: values.qualifiedAt }),
+			...(values.urgency === undefined ? {} : { urgency: values.urgency }),
+			status: values.status,
+			updatedAt: values.updatedAt,
+		})
+		.where(eq(leads.id, leadId))
+		.returning();
+
+	if (!updatedLead) {
+		throw new Error("Lead not found");
+	}
+
+	return updatedLead;
 }
 
 export async function generateMarianaResponse({
@@ -102,28 +152,12 @@ export async function generateMarianaResponse({
 			currentStatus: lead.status,
 			leadId,
 			leadUpdate: response.result.leadUpdate,
-			persistLead: async ({ leadId: targetLeadId, values }) => {
-				const [updatedLead] = await tx
-					.update(leads)
-					.set({
-						...(values.consortiumType === undefined
-							? {}
-							: { consortiumType: values.consortiumType }),
-						...(values.objective === undefined
-							? {}
-							: { objective: values.objective }),
-						status: values.status,
-						updatedAt: values.updatedAt,
-					})
-					.where(eq(leads.id, targetLeadId))
-					.returning();
-
-				if (!updatedLead) {
-					throw new Error("Lead not found");
-				}
-
-				return updatedLead;
-			},
+			persistLead: async ({ leadId: targetLeadId, values }) =>
+				persistLeadUpdate({
+					leadId: targetLeadId,
+					tx,
+					values,
+				}),
 		});
 
 		const nextActionResult = await executeNextAction({
