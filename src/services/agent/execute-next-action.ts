@@ -11,9 +11,46 @@ export const NEXT_ACTIONS = [
 	"offer_meeting",
 	"schedule_meeting",
 	"close",
+	"answer_basic_question",
+	"answer_with_more_detail",
+	"ask_next_qualification_question",
+	"request_consultant",
+	"offer_appointment",
+	"wait_for_schedule",
+	"close_conversation",
+	"reject_out_of_scope",
 ] as const;
 
-export type NextAction = MarianaResponse["nextAction"];
+export type MarianaNextAction =
+	| "answer_basic_question"
+	| "answer_with_more_detail"
+	| "ask_next_qualification_question"
+	| "request_consultant"
+	| "offer_appointment"
+	| "wait_for_schedule"
+	| "close_conversation"
+	| "reject_out_of_scope"
+	| MarianaResponse["nextAction"];
+
+export type NextAction = MarianaNextAction;
+
+const ACTION_ALIASES: Record<MarianaNextAction, MarianaResponse["nextAction"]> =
+	{
+		answer_basic_question: "continue_qualification",
+		answer_with_more_detail: "continue_qualification",
+		ask_next_qualification_question: "continue_qualification",
+		close: "close",
+		close_conversation: "close",
+		continue_qualification: "continue_qualification",
+
+		offer_appointment: "offer_meeting",
+
+		offer_meeting: "offer_meeting",
+		reject_out_of_scope: "close",
+		request_consultant: "offer_meeting",
+		schedule_meeting: "schedule_meeting",
+		wait_for_schedule: "schedule_meeting",
+	};
 
 export type ExecuteNextActionResult =
 	| {
@@ -68,6 +105,8 @@ export async function executeNextAction({
 	},
 }: ExecuteNextActionParams): Promise<ExecuteNextActionResult> {
 	const resolvedConversationId = conversationId;
+	const normalizedAction =
+		ACTION_ALIASES[nextAction as MarianaNextAction] ?? nextAction;
 
 	if (!resolvedConversationId) {
 		throw new Error("Conversation id is required");
@@ -77,15 +116,15 @@ export async function executeNextAction({
 		conversationId: resolvedConversationId,
 		event: "agent_action_started",
 		leadId,
-		nextAction,
+		nextAction: normalizedAction,
 	});
 
-	if (nextAction === "continue_qualification") {
+	if (normalizedAction === "continue_qualification") {
 		console.info({
 			conversationId: resolvedConversationId,
 			event: "agent_action_executed",
 			leadId,
-			nextAction,
+			nextAction: normalizedAction,
 		});
 
 		return {
@@ -94,12 +133,12 @@ export async function executeNextAction({
 		};
 	}
 
-	if (nextAction === "offer_meeting") {
+	if (normalizedAction === "offer_meeting") {
 		console.info({
 			conversationId: resolvedConversationId,
 			event: "agent_action_executed",
 			leadId,
-			nextAction,
+			nextAction: normalizedAction,
 		});
 
 		return {
@@ -108,12 +147,12 @@ export async function executeNextAction({
 		};
 	}
 
-	if (nextAction === "schedule_meeting") {
+	if (normalizedAction === "schedule_meeting") {
 		console.info({
 			conversationId: resolvedConversationId,
 			event: "agent_action_pending",
 			leadId,
-			nextAction,
+			nextAction: normalizedAction,
 		});
 
 		return {
@@ -122,7 +161,7 @@ export async function executeNextAction({
 		};
 	}
 
-	if (nextAction === "close") {
+	if (normalizedAction === "close") {
 		await persistConversationStatus({
 			conversationId: resolvedConversationId,
 			status: "closed",

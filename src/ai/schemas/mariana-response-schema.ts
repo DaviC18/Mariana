@@ -15,7 +15,27 @@ export const QUALIFICATION_REQUIRED_FIELDS = {
 	urgencyValues: leadUrgency.enumValues,
 } as const;
 
+const v1BusinessActions = z.enum([
+	"answer_basic_question",
+	"answer_with_more_detail",
+	"ask_next_qualification_question",
+	"request_consultant",
+	"offer_appointment",
+	"wait_for_schedule",
+	"close_conversation",
+	"reject_out_of_scope",
+]);
+
+const legacyNextActions = z.enum([
+	"continue_qualification",
+	"offer_meeting",
+	"schedule_meeting",
+	"close",
+]);
+
 export const marianaResponseSchema = z.object({
+	businessAction: v1BusinessActions.optional(),
+	extractedData: z.record(z.string(), z.any()).optional(),
 	leadUpdate: z.object({
 		commercialApproach: marianaLeadCommercialApproach.nullable().optional(),
 		consortiumType: z.string().trim().min(1).nullable().optional(),
@@ -27,13 +47,13 @@ export const marianaResponseSchema = z.object({
 		status: marianaLeadStatus,
 		urgency: marianaLeadUrgency.nullable().optional(),
 	}),
-	nextAction: z.enum([
-		"continue_qualification",
-		"offer_meeting",
-		"schedule_meeting",
-		"close",
-	]),
+	missingData: z.array(z.string()).optional(),
+	needsConfirmation: z.boolean().optional(),
+	nextAction: z
+		.union([legacyNextActions, v1BusinessActions])
+		.default("continue_qualification"),
 	reply: z.string().trim().min(1, "reply is required"),
+	riskFlags: z.array(z.string()).optional(),
 });
 
 export type MarianaResponse = z.infer<typeof marianaResponseSchema>;

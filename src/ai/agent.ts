@@ -3,7 +3,7 @@
 
 import type { GenerateContentResponse } from "@google/genai";
 import { z } from "zod";
-
+import { assertSafeMarianaReply } from "../services/conversations/mariana-safety";
 import { ai } from "./client";
 import { MARIANA_SYSTEM_PROMPT } from "./prompt";
 import {
@@ -106,6 +106,7 @@ Status: ${lead.status}
 	}
 
 	const result = marianaResponseSchema.parse(parsed);
+	assertSafeMarianaReply(result.reply);
 
 	return {
 		metadata: {

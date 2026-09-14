@@ -1,6 +1,21 @@
 import "dotenv/config";
 import z from "zod";
 
+const parseIntegerEnv = (value: string | undefined, fallback: number) => {
+	if (value === undefined || value === "") {
+		return fallback;
+	}
+
+	const normalized = value.replace(/_/g, "");
+	const parsed = Number(normalized);
+
+	if (!Number.isFinite(parsed)) {
+		return fallback;
+	}
+
+	return parsed;
+};
+
 const envSchema = z.object({
 	DATABASE_URL: z
 		.string()
@@ -15,11 +30,22 @@ const envSchema = z.object({
 		.enum(["development", "production", "test"])
 		.default("development"),
 	PORT: z.coerce.number().default(3252),
+	SCHEDULE_CONFIRMATION_MINUTES: z.coerce
+		.number()
+		.int()
+		.min(30)
+		.max(60)
+		.default(60),
 });
 
 export const env = envSchema.parse({
 	DATABASE_URL: process.env.DATABASE_URL,
 	GEMINI_API_KEY: process.env.GEMINI_API_KEY,
+	MESSAGE_DEBOUNCE_MS: parseIntegerEnv(process.env.MESSAGE_DEBOUNCE_MS, 15_000),
 	NODE_ENV: process.env.NODE_ENV,
-	PORT: process.env.PORT,
+	PORT: parseIntegerEnv(process.env.PORT, 3252),
+	SCHEDULE_CONFIRMATION_MINUTES: parseIntegerEnv(
+		process.env.SCHEDULE_CONFIRMATION_MINUTES,
+		60
+	),
 });
