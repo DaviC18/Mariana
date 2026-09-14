@@ -1,7 +1,7 @@
 /** biome-ignore-all lint/style/useFilenamingConvention: <> */
 
 import type { InferInsertModel } from "drizzle-orm";
-import { and, asc, eq } from "drizzle-orm";
+import { and, asc, eq, lte } from "drizzle-orm";
 
 import {
 	type GenerateMarianaReplyResult,
@@ -20,6 +20,8 @@ type PersistLeadTransactionValues = Partial<InferInsertModel<typeof leads>> & {
 export interface GenerateMarianaResponseParams {
 	currentMessage: string;
 	leadId: string;
+	messageCutoff?: Date;
+	persistUserMessage?: boolean;
 }
 
 export interface GenerateMarianaResponseResult {
@@ -74,7 +76,9 @@ async function persistLeadUpdate({
 
 export async function generateMarianaResponse({
 	leadId,
+	messageCutoff,
 	currentMessage,
+	persistUserMessage = true,
 }: GenerateMarianaResponseParams): Promise<GenerateMarianaResponseResult> {
 	// 1. Busca o lead
 	const [lead] = await db
@@ -100,18 +104,27 @@ export async function generateMarianaResponse({
 		throw new Error("Active conversation not found");
 	}
 
-	// 3. Salva a mensagem do usuário
-	await db.insert(messages).values({
-		content: currentMessage,
-		conversationId: activeConversation.id,
-		role: "user",
-	});
+	// 3. Salva a mensagem do usuário quando ela ainda não foi persistida
+	if (persistUserMessage) {
+		await db.insert(messages).values({
+			content: currentMessage,
+			conversationId: activeConversation.id,
+			role: "user",
+		});
+	}
 
 	// 4. Busca o histórico
 	const history = await db
 		.select()
 		.from(messages)
-		.where(eq(messages.conversationId, activeConversation.id))
+		.where(
+			messageCutoff
+				? and(
+						eq(messages.conversationId, activeConversation.id),
+						lte(messages.createdAt, messageCutoff)
+					)
+				: eq(messages.conversationId, activeConversation.id)
+		)
 		.orderBy(asc(messages.createdAt));
 
 	// 5. Contexto do lead

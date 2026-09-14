@@ -10,6 +10,7 @@ const envSchema = z.object({
 			message: "DATABSE_URL It should start with postgresql://",
 		}),
 	GEMINI_API_KEY: z.string().min(1),
+	MESSAGE_DEBOUNCE_MS: z.coerce.number().int().positive().default(15_000),
 	NODE_ENV: z
 		.enum(["development", "production", "test"])
 		.default("development"),

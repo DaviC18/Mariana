@@ -1,8 +1,6 @@
-import { eq } from "drizzle-orm";
 import type { FastifyPluginCallbackZod } from "fastify-type-provider-zod";
 import z from "zod";
-import { db } from "../../db/connections";
-import { conversations, messages } from "../../db/schema";
+import { receiveCustomerMessage } from "../../services/conversations/receive-customer-message";
 
 export const createMessages: FastifyPluginCallbackZod = (app) => {
 	app.post(
@@ -26,40 +24,12 @@ export const createMessages: FastifyPluginCallbackZod = (app) => {
 				const { conversationId } = request.params;
 				const { role, content, externalId } = request.body;
 
-				const [conversation] = await db
-					.select({ id: conversations.id })
-					.from(conversations)
-					.where(eq(conversations.id, conversationId))
-					.limit(1);
-
-				if (!conversation) {
-					const duration = Date.now() - startedAt;
-
-					request.log.warn({
-						conversationId,
-						duration,
-						event: "message_conversation_not_found",
-					});
-
-					return reply.code(404).send({ error: "Conversation not found" });
-				}
-
-				const [message] = await db
-					.insert(messages)
-					.values({
-						content,
-						conversationId,
-						externalId,
-						role,
-					})
-					.returning();
-
-				await db
-					.update(conversations)
-					.set({
-						updatedAt: new Date(),
-					})
-					.where(eq(conversations.id, conversationId));
+				const { duplicate, message } = await receiveCustomerMessage({
+					content,
+					conversationId,
+					externalId,
+					role,
+				});
 
 				const duration = Date.now() - startedAt;
 
@@ -72,6 +42,7 @@ export const createMessages: FastifyPluginCallbackZod = (app) => {
 				});
 
 				return reply.code(201).send({
+					duplicate,
 					message,
 				});
 			} catch (error) {
@@ -84,7 +55,12 @@ export const createMessages: FastifyPluginCallbackZod = (app) => {
 					event: "message_creation_failed",
 				});
 
-				return reply.code(500).send({
+				const statusCode =
+					error instanceof Error && error.message === "Conversation not found"
+						? 404
+						: 500;
+
+				return reply.code(statusCode).send({
 					error: "Failed to create message",
 				});
 			}
