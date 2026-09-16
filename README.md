@@ -89,7 +89,7 @@ npm run dev
 - sem fila distribuída/Redis para processamento multi-instância;
 - sem integração real com WhatsApp, Google Calendar ou provedores externos;
 - sem disponibilidade real de consultores e horários vindos de sistema externo;
-- dependência de definição oficial da Ademicon para regras específicas de idade, horário e prioridade comercial;
+- dependência de definição oficial da Ademicon para regras específicas de horário e prioridade comercial;
 - comportamento de alertas passivos ainda preparado para extensão e não integrado a canal externo.
 
 ## Dependências externas e pendências da Ademicon
@@ -117,6 +117,6 @@ Ainda dependem de definição oficial da Ademicon:
 - integrar fila distribuída com Redis ou broker;
 - persistir a fila de disponibilidade real e avisos passivos;
 - conectar consultores e agenda real;
-- validar regras de idade e compatibilidade com a Ademicon;
+- validar compatibilidade de horários e regras operacionais com a Ademicon;
 - adicionar canais de WhatsApp e Google Calendar reais;
 - ampliar testes de integração com o fluxo completo de lead para agendamento.

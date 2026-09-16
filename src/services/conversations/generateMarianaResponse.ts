@@ -1,7 +1,7 @@
 /** biome-ignore-all lint/style/useFilenamingConvention: <> */
 
 import type { InferInsertModel } from "drizzle-orm";
-import { and, asc, eq, lte } from "drizzle-orm";
+import { and, asc, eq, inArray, lte } from "drizzle-orm";
 
 import {
 	type GenerateMarianaReplyResult,
@@ -10,6 +10,7 @@ import {
 import { db } from "../../db/connections";
 import { appointments, conversations, leads, messages } from "../../db/schema";
 import { executeNextAction } from "../agent/execute-next-action";
+import { CONFIRMED_APPOINTMENT_STATUSES } from "../appointments/appointment-status";
 import type { LeadStatus } from "../leads/lead-status";
 import { updateLeadFromAgent } from "../leads/update-lead-from-agent";
 
@@ -42,6 +43,9 @@ async function persistLeadUpdate({
 	const [updatedLead] = await tx
 		.update(leads)
 		.set({
+			...(values.birthDate === undefined
+				? {}
+				: { birthDate: values.birthDate }),
 			...(values.commercialApproach === undefined
 				? {}
 				: { commercialApproach: values.commercialApproach }),
@@ -156,7 +160,12 @@ export async function generateMarianaResponse({
 	const [existingAppointment] = await db
 		.select({ id: appointments.id })
 		.from(appointments)
-		.where(eq(appointments.leadId, leadId))
+		.where(
+			and(
+				eq(appointments.leadId, leadId),
+				inArray(appointments.status, CONFIRMED_APPOINTMENT_STATUSES)
+			)
+		)
 		.limit(1);
 
 	const appointmentCreated = Boolean(existingAppointment);
@@ -167,6 +176,7 @@ export async function generateMarianaResponse({
 			appointmentCreated,
 			currentStatus: lead.status,
 			existingLead: {
+				birthDate: lead.birthDate,
 				consortiumType: lead.consortiumType,
 				currentSituation: lead.currentSituation,
 				objective: lead.objective,

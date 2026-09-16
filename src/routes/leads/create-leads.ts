@@ -5,6 +5,7 @@ import type { FastifyPluginCallbackZod } from "fastify-type-provider-zod";
 import z from "zod";
 import { db } from "../../db/connections";
 import { leads } from "../../db/schema";
+import { isAtLeast18 } from "../../services/leads/lead-qualification";
 
 export const createLeads: FastifyPluginCallbackZod = (app) => {
 	app.post(
@@ -12,6 +13,7 @@ export const createLeads: FastifyPluginCallbackZod = (app) => {
 		{
 			schema: {
 				body: z.object({
+					birthDate: z.coerce.date().optional(),
 					consortiumType: z.string().min(1),
 					name: z.string().min(1),
 					objective: z.string().min(1),
@@ -23,6 +25,12 @@ export const createLeads: FastifyPluginCallbackZod = (app) => {
 			const starteAt = Date.now();
 			const leadData = request.body;
 
+			if (leadData.birthDate && !isAtLeast18(leadData.birthDate)) {
+				return reply.code(400).send({
+					error: "Lead must be at least 18 years old",
+				});
+			}
+
 			request.log.info({
 				event: "lead_creation_start",
 			});
@@ -32,6 +40,9 @@ export const createLeads: FastifyPluginCallbackZod = (app) => {
 					.insert(leads)
 					.values({
 						consortiumType: leadData.consortiumType,
+						...(leadData.birthDate === undefined
+							? {}
+							: { birthDate: leadData.birthDate }),
 						name: leadData.name,
 						objective: leadData.objective,
 						phone: leadData.phone,

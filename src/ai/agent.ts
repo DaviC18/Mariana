@@ -5,6 +5,7 @@ import type { GenerateContentResponse } from "@google/genai";
 import { z } from "zod";
 import { assertSafeMarianaReply } from "../services/conversations/mariana-safety";
 import { ai } from "./client";
+import { MARIANA_KNOWLEDGE } from "./knowledge";
 import { MARIANA_SYSTEM_PROMPT } from "./prompt";
 import {
 	type MarianaResponse,
@@ -65,6 +66,10 @@ export async function generateMarianaReply({
 
 	const contextualSystemPrompt = `
 ${MARIANA_SYSTEM_PROMPT}
+
+	# BASE DE CONHECIMENTO AUTORIZADA
+
+	${MARIANA_KNOWLEDGE}
 
 # CONTEXTO ATUAL DO LEAD
 

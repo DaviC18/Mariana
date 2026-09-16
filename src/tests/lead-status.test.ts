@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { isLeadQualified } from "../services/leads/lead-qualification";
+import {
+	isAtLeast18,
+	isLeadQualified,
+} from "../services/leads/lead-qualification";
 import {
 	canTransitionLeadStatus,
 	isLeadStatus,
@@ -28,6 +31,42 @@ test("isLeadStatus reconhece valores permitidos", () => {
 	assert.equal(isLeadStatus("qualified"), true);
 	assert.equal(isLeadStatus("scheduled"), true);
 	assert.equal(isLeadStatus("banana"), false);
+});
+
+test("idade mínima de 18 anos é calculada pela data de nascimento", () => {
+	const referenceDate = new Date("2026-09-16T00:00:00.000Z");
+
+	assert.equal(isAtLeast18("2008-09-16", referenceDate), true);
+	assert.equal(isAtLeast18("2008-09-17", referenceDate), false);
+});
+
+test("lead menor de idade não pode ser qualificado", () => {
+	assert.equal(
+		isLeadQualified({
+			birthDate: "2010-01-01",
+			consortiumType: "Veículo",
+			currentSituation: "Uso carro antigo",
+			interestedInConsultant: true,
+			objective: "Comprar um carro",
+			painPoint: "Quero reduzir custos",
+		}),
+		false
+	);
+});
+
+test("updateLeadFromAgent rejeita data de nascimento menor de idade", async () => {
+	await assert.rejects(
+		() =>
+			updateLeadFromAgent({
+				currentStatus: "qualifying",
+				leadId: "lead-underage",
+				leadUpdate: {
+					birthDate: new Date("2010-01-01"),
+					status: "qualifying",
+				},
+			}),
+		{ message: "Lead must be at least 18 years old" }
+	);
 });
 
 test("updateLeadFromAgent rejeita agendamento sem confirmação de appointment", async () => {

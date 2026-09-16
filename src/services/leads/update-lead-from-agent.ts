@@ -4,7 +4,7 @@ import { eq } from "drizzle-orm";
 
 import { db } from "../../db/connections";
 import { leads } from "../../db/schema";
-import { isLeadQualified } from "./lead-qualification";
+import { isAtLeast18, isLeadQualified } from "./lead-qualification";
 import { canTransitionLeadStatus, type LeadStatus } from "./lead-status";
 
 const VALID_URGENCIES = [
@@ -28,6 +28,7 @@ export interface UpdateLeadFromAgentInput {
 	appointmentCreated?: boolean;
 	currentStatus: string;
 	existingLead?: {
+		birthDate?: Date | null;
 		consortiumType?: string | null;
 		currentSituation?: string | null;
 		motivation?: string | null;
@@ -37,6 +38,7 @@ export interface UpdateLeadFromAgentInput {
 	interestedInConsultant?: boolean | null;
 	leadId: string;
 	leadUpdate: {
+		birthDate?: Date | null;
 		commercialApproach?: string | null;
 		consortiumType?: string | null;
 		currentSituation?: string | null;
@@ -53,6 +55,7 @@ export interface UpdateLeadFromAgentInput {
 interface PersistLeadInput {
 	leadId: string;
 	values: {
+		birthDate?: Date;
 		commercialApproach?: (typeof VALID_COMMERCIAL_APPROACHES)[number];
 		consortiumType?: string;
 		currentSituation?: string;
@@ -78,6 +81,7 @@ function buildQualifiedCandidate(
 		leadUpdate.interestedInConsultant ?? interestedInConsultant;
 
 	return {
+		birthDate: leadUpdate.birthDate ?? existingLead?.birthDate,
 		consortiumType: normalizeText(
 			leadUpdate.consortiumType ?? existingLead?.consortiumType
 		),
@@ -102,6 +106,9 @@ function applyNormalizedLeadValues(
 	values: PersistLeadInput["values"],
 	leadUpdate: UpdateLeadFromAgentInput["leadUpdate"]
 ) {
+	if (leadUpdate.birthDate !== null && leadUpdate.birthDate !== undefined) {
+		values.birthDate = leadUpdate.birthDate;
+	}
 	if (
 		leadUpdate.consortiumType !== null &&
 		leadUpdate.consortiumType !== undefined
@@ -211,6 +218,10 @@ async function defaultPersistLead({
 		updatePayload.consortiumType = values.consortiumType;
 	}
 
+	if (values.birthDate !== undefined) {
+		updatePayload.birthDate = values.birthDate;
+	}
+
 	if (values.objective !== undefined) {
 		updatePayload.objective = values.objective;
 	}
@@ -283,6 +294,14 @@ export async function updateLeadFromAgent({
 		existingLead,
 		interestedInConsultant
 	);
+
+	if (
+		qualifiedCandidate.birthDate !== null &&
+		qualifiedCandidate.birthDate !== undefined &&
+		!isAtLeast18(qualifiedCandidate.birthDate)
+	) {
+		throw new Error("Lead must be at least 18 years old");
+	}
 
 	if (
 		normalizedStatus === "qualified" &&

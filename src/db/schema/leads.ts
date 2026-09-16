@@ -35,6 +35,7 @@ export const leadCommercialApproach = pgEnum("lead_commercial_approach", [
 export const leads = pgTable(
 	"leads",
 	{
+		birthDate: timestamp({ withTimezone: true }),
 		id: uuid().primaryKey().defaultRandom(),
 		name: text().notNull(),
 		phone: text().notNull(),

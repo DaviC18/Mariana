@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { isConfirmedAppointmentStatus } from "../services/appointments/appointment-status";
 import { createAvailabilityWaitlist } from "../services/availability/waitlist";
 import { findMentorWithLowestLoad } from "../services/consultants/consultant-load";
 import { isGuardrailHit } from "../services/conversations/mariana-safety";
@@ -17,6 +18,19 @@ test("guardrails bloqueiam frases de garantia sem fonte oficial", () => {
 		isGuardrailHit("A contemplação depende das regras do grupo."),
 		false
 	);
+	assert.equal(
+		isGuardrailHit("Recomendo um lance de 30% para esse grupo."),
+		true
+	);
+	assert.equal(isGuardrailHit("Essa é a carta ideal para você."), true);
+	assert.equal(isGuardrailHit("Não há garantia de contemplação."), false);
+});
+
+test("somente estados confirmados representam reunião confirmada", () => {
+	assert.equal(isConfirmedAppointmentStatus("pending_confirmation"), false);
+	assert.equal(isConfirmedAppointmentStatus("expired"), false);
+	assert.equal(isConfirmedAppointmentStatus("confirmed"), true);
+	assert.equal(isConfirmedAppointmentStatus("scheduled"), true);
 });
 
 test("a distribuição prioriza a menor carga atual de reuniões", () => {

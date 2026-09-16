@@ -31,6 +31,19 @@ test("offer_meeting retorna status executed", async () => {
 	});
 });
 
+test("pedido direto de consultor segue para oferta de reunião", async () => {
+	const result = await executeNextAction({
+		conversationId: "conv-consultant",
+		leadId: "lead-consultant",
+		nextAction: "request_consultant",
+	});
+
+	assert.deepEqual(result, {
+		action: "offer_meeting",
+		status: "executed",
+	});
+});
+
 test("schedule_meeting retorna status pending sem criar appointment", async () => {
 	const result = await executeNextAction({
 		conversationId: "conv-3",
