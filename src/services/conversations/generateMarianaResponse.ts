@@ -183,7 +183,14 @@ export async function generateMarianaResponse({
 				painPoint: lead.painPoint,
 			},
 			leadId,
-			leadUpdate: response.result.leadUpdate,
+			leadUpdate: {
+				...response.result.leadUpdate,
+				birthDate:
+					response.result.leadUpdate.birthDate === undefined ||
+					response.result.leadUpdate.birthDate === null
+						? response.result.leadUpdate.birthDate
+						: new Date(response.result.leadUpdate.birthDate),
+			},
 			persistLead: async ({ leadId: targetLeadId, values }) =>
 				persistLeadUpdate({
 					leadId: targetLeadId,

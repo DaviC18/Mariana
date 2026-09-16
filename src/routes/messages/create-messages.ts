@@ -4,7 +4,7 @@ import { receiveCustomerMessage } from "../../services/conversations/receive-cus
 
 export const createMessages: FastifyPluginCallbackZod = (app) => {
 	app.post(
-		"/messages",
+		"/conversations/:conversationId/messages",
 		{
 			schema: {
 				body: z.object({

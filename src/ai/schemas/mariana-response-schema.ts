@@ -37,7 +37,7 @@ export const marianaResponseSchema = z.object({
 	businessAction: v1BusinessActions.optional(),
 	extractedData: z.record(z.string(), z.any()).optional(),
 	leadUpdate: z.object({
-		birthDate: z.coerce.date().nullable().optional(),
+		birthDate: z.iso.date().nullable().optional(),
 		commercialApproach: marianaLeadCommercialApproach.nullable().optional(),
 		consortiumType: z.string().trim().min(1).nullable().optional(),
 		currentSituation: z.string().trim().min(1).nullable().optional(),

@@ -12,7 +12,7 @@ import {
 	marianaResponseSchema,
 } from "./schemas/mariana-response-schema";
 
-const MODEL = "gemini-3.6-flash";
+const MODEL = "gemini-3.5-flash";
 const CODE_FENCE_START = /^```(?:json)?\s*/i;
 const CODE_FENCE_END = /\s*```$/i;
 

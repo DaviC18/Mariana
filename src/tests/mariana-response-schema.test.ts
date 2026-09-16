@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { z } from "zod";
 
 import { marianaResponseSchema } from "../ai/schemas/mariana-response-schema";
 
@@ -72,4 +73,20 @@ test("interestedInConsultant aceita true, false ou ausência", () => {
 
 		assert.doesNotThrow(() => marianaResponseSchema.parse(payload));
 	}
+});
+
+test("schema da resposta é compatível com JSON Schema do Gemini", () => {
+	assert.doesNotThrow(() => z.toJSONSchema(marianaResponseSchema));
+});
+
+test("birthDate é recebido como data ISO na resposta da IA", () => {
+	const parsed = marianaResponseSchema.parse({
+		leadUpdate: {
+			birthDate: "2008-09-16",
+			status: "qualifying",
+		},
+		reply: "Vou registrar sua data de nascimento.",
+	});
+
+	assert.equal(parsed.leadUpdate.birthDate, "2008-09-16");
 });
