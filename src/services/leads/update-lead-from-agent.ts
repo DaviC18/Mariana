@@ -271,29 +271,39 @@ export async function updateLeadFromAgent({
 }: UpdateLeadFromAgentInput & {
 	persistLead?: PersistLeadFn;
 }): Promise<{ id: string }> {
-	if (!canTransitionLeadStatus(currentStatus, leadUpdate.status)) {
-		throw new Error(
-			`Invalid lead status transition from ${currentStatus} to ${leadUpdate.status}`
-		);
-	}
-
-	if (leadUpdate.status === "scheduled" && !appointmentCreated) {
-		throw new Error(
-			"Lead cannot be scheduled without an explicit appointment confirmation"
-		);
-	}
-
-	const normalizedStatus = leadUpdate.status as LeadStatus;
-	const values: PersistLeadInput["values"] = {
-		status: normalizedStatus,
-		updatedAt: new Date(),
-	};
-
 	const qualifiedCandidate = buildQualifiedCandidate(
 		leadUpdate,
 		existingLead,
 		interestedInConsultant
 	);
+	const qualificationValid = isLeadQualified(qualifiedCandidate);
+
+	const qualificationAttemptRejected =
+		leadUpdate.status === "qualified" &&
+		!(
+			qualificationValid && canTransitionLeadStatus(currentStatus, "qualified")
+		);
+	const effectiveStatus = qualificationAttemptRejected
+		? currentStatus
+		: leadUpdate.status;
+
+	if (!canTransitionLeadStatus(currentStatus, effectiveStatus)) {
+		throw new Error(
+			`Invalid lead status transition from ${currentStatus} to ${effectiveStatus}`
+		);
+	}
+
+	if (effectiveStatus === "scheduled" && !appointmentCreated) {
+		throw new Error(
+			"Lead cannot be scheduled without an explicit appointment confirmation"
+		);
+	}
+
+	const normalizedStatus = effectiveStatus as LeadStatus;
+	const values: PersistLeadInput["values"] = {
+		status: normalizedStatus,
+		updatedAt: new Date(),
+	};
 
 	if (
 		qualifiedCandidate.birthDate !== null &&
@@ -301,15 +311,6 @@ export async function updateLeadFromAgent({
 		!isAtLeast18(qualifiedCandidate.birthDate)
 	) {
 		throw new Error("Lead must be at least 18 years old");
-	}
-
-	if (
-		normalizedStatus === "qualified" &&
-		!isLeadQualified(qualifiedCandidate)
-	) {
-		throw new Error(
-			"Lead cannot be qualified without objective, consortiumType, painPoint or motivation, currentSituation, and explicit interest in consultant"
-		);
 	}
 
 	applyNormalizedLeadValues(values, leadUpdate);

@@ -1,7 +1,8 @@
 /** biome-ignore-all lint/style/useFilenamingConvention: <> */
+/** biome-ignore-all assist/source/useSortedKeys: <> */
 
-import type { InferInsertModel } from "drizzle-orm";
-import { and, asc, eq, inArray, lte } from "drizzle-orm";
+import type { InferInsertModel, SQL } from "drizzle-orm";
+import { and, asc, eq, inArray, lt, lte, or } from "drizzle-orm";
 
 import {
 	type GenerateMarianaReplyResult,
@@ -22,6 +23,7 @@ export interface GenerateMarianaResponseParams {
 	currentMessage: string;
 	leadId: string;
 	messageCutoff?: Date;
+	messageIds?: string[];
 	persistUserMessage?: boolean;
 }
 
@@ -31,6 +33,35 @@ export interface GenerateMarianaResponseResult {
 	result: GenerateMarianaReplyResult["result"];
 }
 
+export function buildMessageHistoryCondition({
+	conversationId,
+	messageCutoff,
+	messageIds,
+}: {
+	conversationId: string;
+	messageCutoff?: Date;
+	messageIds?: string[];
+}): SQL {
+	const conversationCondition = eq(messages.conversationId, conversationId);
+
+	if (!messageCutoff) {
+		return conversationCondition;
+	}
+
+	const releasedMessagesCondition = messageIds?.length
+		? inArray(messages.id, messageIds)
+		: undefined;
+	const cutoffCondition = releasedMessagesCondition
+		? lt(messages.createdAt, messageCutoff)
+		: lte(messages.createdAt, messageCutoff);
+
+	return and(
+		conversationCondition,
+		releasedMessagesCondition
+			? or(cutoffCondition, releasedMessagesCondition)
+			: cutoffCondition
+	) as SQL;
+}
 async function persistLeadUpdate({
 	leadId,
 	values,
@@ -81,6 +112,7 @@ async function persistLeadUpdate({
 export async function generateMarianaResponse({
 	leadId,
 	messageCutoff,
+	messageIds,
 	currentMessage,
 	persistUserMessage = true,
 }: GenerateMarianaResponseParams): Promise<GenerateMarianaResponseResult> {
@@ -122,12 +154,11 @@ export async function generateMarianaResponse({
 		.select()
 		.from(messages)
 		.where(
-			messageCutoff
-				? and(
-						eq(messages.conversationId, activeConversation.id),
-						lte(messages.createdAt, messageCutoff)
-					)
-				: eq(messages.conversationId, activeConversation.id)
+			buildMessageHistoryCondition({
+				conversationId: activeConversation.id,
+				messageCutoff,
+				messageIds,
+			})
 		)
 		.orderBy(asc(messages.createdAt));
 

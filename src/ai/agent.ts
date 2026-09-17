@@ -6,6 +6,11 @@ import { z } from "zod";
 import { assertSafeMarianaReply } from "../services/conversations/mariana-safety";
 import { ai } from "./client";
 import { MARIANA_KNOWLEDGE } from "./knowledge";
+import {
+	formatKnowledgeContext,
+	retrieveKnowledge,
+} from "./knowledge/retrieve";
+import { validateMarianaEvidence } from "./knowledge/validate-response";
 import { MARIANA_SYSTEM_PROMPT } from "./prompt";
 import {
 	type MarianaResponse,
@@ -63,13 +68,20 @@ export async function generateMarianaReply({
 			],
 			role: message.role === "assistant" ? "model" : "user",
 		}));
+	const latestUserMessage =
+		[...messages].reverse().find((message) => message.role === "user")
+			?.content ?? "";
+	const knowledgeContext = retrieveKnowledge({
+		items: MARIANA_KNOWLEDGE,
+		query: latestUserMessage,
+	});
 
 	const contextualSystemPrompt = `
 ${MARIANA_SYSTEM_PROMPT}
 
 	# BASE DE CONHECIMENTO AUTORIZADA
 
-	${MARIANA_KNOWLEDGE}
+	${formatKnowledgeContext(knowledgeContext)}
 
 # CONTEXTO ATUAL DO LEAD
 
@@ -110,7 +122,12 @@ Status: ${lead.status}
 		throw new Error("Gemini response was not valid JSON", { cause: error });
 	}
 
-	const result = marianaResponseSchema.parse(parsed);
+	const parsedResult = marianaResponseSchema.parse(parsed);
+	const result = validateMarianaEvidence({
+		query: latestUserMessage,
+		response: parsedResult,
+		retrieval: knowledgeContext,
+	});
 	assertSafeMarianaReply(result.reply);
 
 	return {

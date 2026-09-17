@@ -208,33 +208,74 @@ test("lead com todos os requisitos pode ser qualified", () => {
 	);
 });
 
-test("updateLeadFromAgent rejeita qualified sem interesse explícito", async () => {
-	const createQualificationAttempt = (
-		interestedInConsultant: boolean | undefined
-	) =>
+test("updateLeadFromAgent rejeita qualified sem interesse explícito sem falhar o fluxo", async () => {
+	const persistedStatuses = await Promise.all(
+		[undefined, false].map(async (interestedInConsultant) => {
+			let persistedStatus: string | undefined;
+
+			await assert.doesNotReject(() =>
+				updateLeadFromAgent({
+					currentStatus: "qualifying",
+					interestedInConsultant,
+					leadId: "lead-explicit-interest",
+					leadUpdate: {
+						consortiumType: "Veículo",
+						currentSituation: "Uso carro antigo",
+						interestedInConsultant,
+						objective: "Comprar um carro",
+						painPoint: "Quero reduzir custos",
+						status: "qualified",
+					},
+					persistLead: ({ values }) => {
+						persistedStatus = values.status;
+						return Promise.resolve({ id: "lead-explicit-interest" });
+					},
+				})
+			);
+
+			return persistedStatus;
+		})
+	);
+
+	assert.deepEqual(persistedStatuses, ["qualifying", "qualifying"]);
+});
+
+test("updateLeadFromAgent mantém o status quando a promoção para qualified é inválida", async () => {
+	let persistedStatus: string | undefined;
+
+	await assert.doesNotReject(() =>
 		updateLeadFromAgent({
-			currentStatus: "qualifying",
-			leadId: "lead-explicit-interest",
+			currentStatus: "new",
+			leadId: "lead-invalid-qualification",
 			leadUpdate: {
-				consortiumType: "Veículo",
-				currentSituation: "Uso carro antigo",
-				interestedInConsultant,
-				objective: "Comprar um carro",
-				painPoint: "Quero reduzir custos",
 				status: "qualified",
 			},
-		});
+			persistLead: ({ values }) => {
+				persistedStatus = values.status;
+				return Promise.resolve({ id: "lead-invalid-qualification" });
+			},
+		})
+	);
 
-	await Promise.all([
-		assert.rejects(createQualificationAttempt(undefined), {
-			message:
-				"Lead cannot be qualified without objective, consortiumType, painPoint or motivation, currentSituation, and explicit interest in consultant",
-		}),
-		assert.rejects(createQualificationAttempt(false), {
-			message:
-				"Lead cannot be qualified without objective, consortiumType, painPoint or motivation, currentSituation, and explicit interest in consultant",
-		}),
-	]);
+	assert.equal(persistedStatus, "new");
+});
+
+test("lead incompleto com resposta não qualificadora continua sendo persistido", async () => {
+	let persistedStatus: string | undefined;
+
+	await updateLeadFromAgent({
+		currentStatus: "new",
+		leadId: "lead-simple-question",
+		leadUpdate: {
+			status: "qualifying",
+		},
+		persistLead: ({ values }) => {
+			persistedStatus = values.status;
+			return Promise.resolve({ id: "lead-simple-question" });
+		},
+	});
+
+	assert.equal(persistedStatus, "qualifying");
 });
 
 test("updateLeadFromAgent aceita qualified com interesse explícito e requisitos completos", async () => {

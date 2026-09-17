@@ -35,6 +35,7 @@ const legacyNextActions = z.enum([
 
 export const marianaResponseSchema = z.object({
 	businessAction: v1BusinessActions.optional(),
+	evidenceUsed: z.array(z.string().min(1)).optional(),
 	extractedData: z.record(z.string(), z.any()).optional(),
 	leadUpdate: z.object({
 		birthDate: z.iso.date().nullable().optional(),

@@ -62,6 +62,10 @@ test("nova mensagem inicia o timer e três mensagens formam um bloco ordenado", 
 		processed[0]?.messages.map((message) => message.content),
 		["Quero um carro", "Tenho um carro usado", "Quero trocar esse ano"]
 	);
+	assert.deepEqual(
+		processed[0]?.messages.map((message) => message.id),
+		["1", "2", "3"]
+	);
 	t.mock.timers.reset();
 });
 

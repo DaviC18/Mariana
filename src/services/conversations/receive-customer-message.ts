@@ -71,12 +71,21 @@ export async function receiveCustomerMessage({
 				id: message.id,
 				receivedAt: message.createdAt,
 			},
-			process: async () => {
-				const messageCutoff = message.createdAt;
+			process: async ({ messages: debouncedMessages }) => {
+				const messageCutoff = debouncedMessages.reduce(
+					(latest, debouncedMessage) =>
+						debouncedMessage.receivedAt > latest
+							? debouncedMessage.receivedAt
+							: latest,
+					debouncedMessages[0]?.receivedAt ?? message.createdAt
+				);
 				await generateMarianaResponse({
 					currentMessage: "",
 					leadId: conversation.leadId,
 					messageCutoff,
+					messageIds: debouncedMessages.map(
+						(debouncedMessage) => debouncedMessage.id
+					),
 					persistUserMessage: false,
 				});
 			},
