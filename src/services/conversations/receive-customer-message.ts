@@ -80,7 +80,9 @@ export async function receiveCustomerMessage({
 					debouncedMessages[0]?.receivedAt ?? message.createdAt
 				);
 				await generateMarianaResponse({
-					currentMessage: "",
+					currentMessages: debouncedMessages.map(
+						(debouncedMessage) => debouncedMessage.content
+					),
 					leadId: conversation.leadId,
 					messageCutoff,
 					messageIds: debouncedMessages.map(

@@ -16,8 +16,9 @@ if (invokedScriptPath !== currentScriptPath) {
 async function main() {
 	const result = await generateMarianaResponse({
 		leadId: "85cd4677-ab28-4344-9b74-44b205a65c09",
-		currentMessage:
+		currentMessages: [
 			"Quero um consórcio de imóvel e penso em uma carta de 300 mil.",
+		],
 	});
 
 	console.log("reply:");

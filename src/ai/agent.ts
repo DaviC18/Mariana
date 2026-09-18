@@ -1,4 +1,6 @@
 /** biome-ignore-all lint/style/useFilenamingConvention: <> */
+/** biome-ignore-all lint/correctness/noUndeclaredVariables: <explanation> */
+/** biome-ignore-all assist/source/useSortedInterfaceMembers: <explanation> */
 /** biome-ignore-all lint/style/useDestructuring: <> */
 
 import type { GenerateContentResponse } from "@google/genai";
@@ -6,6 +8,11 @@ import { z } from "zod";
 import { assertSafeMarianaReply } from "../services/conversations/mariana-safety";
 import { ai } from "./client";
 import { MARIANA_KNOWLEDGE } from "./knowledge";
+import {
+	COMMERCIAL_HANDOFF,
+	LEVEL_TWO_INSTRUCTION,
+	resolveCommercialAccess,
+} from "./knowledge/commercial-policy";
 import {
 	formatKnowledgeContext,
 	retrieveKnowledge,
@@ -17,7 +24,7 @@ import {
 	marianaResponseSchema,
 } from "./schemas/mariana-response-schema";
 
-const MODEL = "gemini-3.5-flash";
+const MODEL = "gemini-3.5-flash-lite";
 const CODE_FENCE_START = /^```(?:json)?\s*/i;
 const CODE_FENCE_END = /\s*```$/i;
 
@@ -40,7 +47,8 @@ export interface MarianaLead {
 
 export interface GenerateMarianaReplyParams {
 	lead: MarianaLead;
-	messages: MarianaMessage[];
+	history: MarianaMessage[];
+	currentMessages: MarianaMessage[];
 }
 
 export interface GenerateMarianaReplyResult {
@@ -54,11 +62,13 @@ export interface GenerateMarianaReplyResult {
 
 export async function generateMarianaReply({
 	lead,
-	messages,
+	history,
+	currentMessages,
 }: GenerateMarianaReplyParams): Promise<GenerateMarianaReplyResult> {
 	const startedAt = Date.now();
+	const allMessages = [...history, ...currentMessages];
 
-	const contents = messages
+	const contents = allMessages
 		.filter((message) => message.role !== "system")
 		.map((message) => ({
 			parts: [
@@ -68,13 +78,48 @@ export async function generateMarianaReply({
 			],
 			role: message.role === "assistant" ? "model" : "user",
 		}));
+
+	const currentUserMessages = currentMessages.filter(
+		(message) => message.role === "user"
+	);
+
 	const latestUserMessage =
-		[...messages].reverse().find((message) => message.role === "user")
+		[...currentMessages].reverse().find((message) => message.role === "user")
 			?.content ?? "";
+
+	const currentBlockQuery = currentUserMessages
+		.map((message) => message.content)
+		.join("\n");
+
 	const knowledgeContext = retrieveKnowledge({
 		items: MARIANA_KNOWLEDGE,
-		query: latestUserMessage,
+		query: currentBlockQuery,
 	});
+
+	const commercialAccess = resolveCommercialAccess({
+		message: currentBlockQuery,
+		retrievedKnowledge: knowledgeContext,
+	});
+
+	if (commercialAccess.level === 3) {
+		return {
+			metadata: {
+				latencyMs: Date.now() - startedAt,
+				model: MODEL,
+				usage: null,
+			},
+			result: marianaResponseSchema.parse({
+				businessAction: "request_consultant",
+				evidenceUsed: [],
+				leadUpdate: { status: lead.status },
+				nextAction: "request_consultant",
+				reply: COMMERCIAL_HANDOFF,
+			}),
+		};
+	}
+
+	const accessInstruction =
+		commercialAccess.level === 2 ? `\n\n${LEVEL_TWO_INSTRUCTION}` : "";
 
 	const contextualSystemPrompt = `
 ${MARIANA_SYSTEM_PROMPT}
@@ -93,6 +138,7 @@ Urgência: ${lead.urgency ?? "não informada"}
 Situação atual: ${lead.currentSituation ?? "não informada"}
 Abordagem comercial: ${lead.commercialApproach ?? "não informada"}
 Status: ${lead.status}
+${accessInstruction}
 `;
 
 	const response = await ai.models.generateContent({
@@ -124,6 +170,7 @@ Status: ${lead.status}
 
 	const parsedResult = marianaResponseSchema.parse(parsed);
 	const result = validateMarianaEvidence({
+		commercialAccess,
 		query: latestUserMessage,
 		response: parsedResult,
 		retrieval: knowledgeContext,

@@ -25,6 +25,9 @@ const envSchema = z.object({
 			message: "DATABSE_URL It should start with postgresql://",
 		}),
 	GEMINI_API_KEY: z.string().min(1),
+	GOOGLE_CLIENT_ID: z.string().min(1),
+	GOOGLE_CLIENT_SECRET: z.string().min(1),
+	GOOGLE_REDIRECT_URI: z.string().min(1),
 	MESSAGE_DEBOUNCE_MS: z.coerce.number().int().positive().default(15_000),
 	NODE_ENV: z
 		.enum(["development", "production", "test"])
@@ -41,6 +44,9 @@ const envSchema = z.object({
 export const env = envSchema.parse({
 	DATABASE_URL: process.env.DATABASE_URL,
 	GEMINI_API_KEY: process.env.GEMINI_API_KEY,
+	GOOGLE_CLIENT_ID: process.env.GOOGLE_CLIENT_ID,
+	GOOGLE_CLIENT_SECRET: process.env.GOOGLE_CLIENT_SECRET,
+	GOOGLE_REDIRECT_URI: process.env.GOOGLE_REDIRECT_URI,
 	MESSAGE_DEBOUNCE_MS: parseIntegerEnv(process.env.MESSAGE_DEBOUNCE_MS, 15_000),
 	NODE_ENV: process.env.NODE_ENV,
 	PORT: parseIntegerEnv(process.env.PORT, 3252),

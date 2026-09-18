@@ -1,4 +1,5 @@
 /** biome-ignore-all lint/style/useFilenamingConvention: <> */
+/** biome-ignore-all lint/correctness/noUnusedVariables: <explanation> */
 /** biome-ignore-all assist/source/useSortedKeys: <> */
 
 import type { InferInsertModel, SQL } from "drizzle-orm";
@@ -20,7 +21,7 @@ type PersistLeadTransactionValues = Partial<InferInsertModel<typeof leads>> & {
 };
 
 export interface GenerateMarianaResponseParams {
-	currentMessage: string;
+	currentMessages: string[];
 	leadId: string;
 	messageCutoff?: Date;
 	messageIds?: string[];
@@ -113,7 +114,7 @@ export async function generateMarianaResponse({
 	leadId,
 	messageCutoff,
 	messageIds,
-	currentMessage,
+	currentMessages,
 	persistUserMessage = true,
 }: GenerateMarianaResponseParams): Promise<GenerateMarianaResponseResult> {
 	// 1. Busca o lead
@@ -141,12 +142,31 @@ export async function generateMarianaResponse({
 	}
 
 	// 3. Salva a mensagem do usuário quando ela ainda não foi persistida
+	let effectiveMessageIds = messageIds ?? [];
+	let effectiveMessageCutoff = messageCutoff;
+
 	if (persistUserMessage) {
-		await db.insert(messages).values({
-			content: currentMessage,
-			conversationId: activeConversation.id,
-			role: "user",
-		});
+		const insertedMessages = await db
+			.insert(messages)
+			.values(
+				currentMessages.map((content) => ({
+					content,
+					conversationId: activeConversation.id,
+					role: "user" as const,
+				}))
+			)
+			.returning({
+				id: messages.id,
+				createdAt: messages.createdAt,
+			});
+
+		effectiveMessageIds = insertedMessages.map((message) => message.id);
+
+		effectiveMessageCutoff = insertedMessages.reduce(
+			(latest, message) =>
+				message.createdAt > latest ? message.createdAt : latest,
+			insertedMessages[0]?.createdAt ?? new Date()
+		);
 	}
 
 	// 4. Busca o histórico
@@ -156,11 +176,21 @@ export async function generateMarianaResponse({
 		.where(
 			buildMessageHistoryCondition({
 				conversationId: activeConversation.id,
-				messageCutoff,
-				messageIds,
+				messageCutoff: effectiveMessageCutoff,
+				messageIds: effectiveMessageIds,
 			})
 		)
 		.orderBy(asc(messages.createdAt));
+
+	const currentMessageIdSet = new Set(effectiveMessageIds);
+
+	const previousHistory = history.filter(
+		(message) => !currentMessageIdSet.has(message.id)
+	);
+
+	const currentBlockMessages = history.filter((message) =>
+		currentMessageIdSet.has(message.id)
+	);
 
 	// 5. Contexto do lead
 	const agentLead = {
@@ -175,7 +205,13 @@ export async function generateMarianaResponse({
 	};
 
 	// 6. Converte histórico
-	const agentMessages = history.map((message) => ({
+	const agentHistory = previousHistory.map((message) => ({
+		content: message.content,
+		createdAt: message.createdAt,
+		role: message.role,
+	}));
+
+	const agentCurrentMessages = currentBlockMessages.map((message) => ({
 		content: message.content,
 		createdAt: message.createdAt,
 		role: message.role,
@@ -184,7 +220,8 @@ export async function generateMarianaResponse({
 	// 7. Chama a IA
 	const response = await generateMarianaReply({
 		lead: agentLead,
-		messages: agentMessages,
+		history: agentHistory,
+		currentMessages: agentCurrentMessages,
 	});
 
 	// 8. Valida regra de negócio antes de persistir qualquer mudança de status
@@ -230,8 +267,15 @@ export async function generateMarianaResponse({
 				}),
 		});
 
+		console.log("ACTION INPUT", {
+			leadId,
+			leadStatusBeforeUpdate: lead.status,
+			nextAction: response.result.nextAction,
+		});
+
 		const nextActionResult = await executeNextAction({
 			conversationId: activeConversation.id,
+			currentStatus: lead.status,
 			leadId,
 			nextAction: response.result.nextAction,
 			persistConversationStatus: async ({

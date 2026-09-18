@@ -42,6 +42,7 @@ export const CONSORTIUM_KNOWLEDGE: KnowledgeItem[] = [
 		version: VERSION,
 	},
 	{
+		accessLevel: 2,
 		category: "general",
 		clientAllowed: true,
 		content:
@@ -52,6 +53,7 @@ export const CONSORTIUM_KNOWLEDGE: KnowledgeItem[] = [
 		version: VERSION,
 	},
 	{
+		accessLevel: 2,
 		category: "general",
 		clientAllowed: true,
 		content:
@@ -62,6 +64,7 @@ export const CONSORTIUM_KNOWLEDGE: KnowledgeItem[] = [
 		version: VERSION,
 	},
 	{
+		accessLevel: 2,
 		category: "contractual",
 		clientAllowed: true,
 		content:
@@ -72,6 +75,7 @@ export const CONSORTIUM_KNOWLEDGE: KnowledgeItem[] = [
 		version: VERSION,
 	},
 	{
+		accessLevel: 2,
 		category: "contractual",
 		clientAllowed: true,
 		content:

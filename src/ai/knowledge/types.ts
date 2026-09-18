@@ -7,8 +7,10 @@ export const KNOWLEDGE_CATEGORIES = [
 ] as const;
 
 export type KnowledgeCategory = (typeof KNOWLEDGE_CATEGORIES)[number];
+export type CommercialAccessLevel = 1 | 2 | 3;
 
 export interface KnowledgeItem {
+	accessLevel?: CommercialAccessLevel;
 	category: KnowledgeCategory;
 	clientAllowed: boolean;
 	content: string;
@@ -20,6 +22,7 @@ export interface KnowledgeItem {
 }
 
 export interface RetrievedKnowledgeItem {
+	accessLevel: CommercialAccessLevel;
 	category: KnowledgeCategory;
 	content: string;
 	id: string;

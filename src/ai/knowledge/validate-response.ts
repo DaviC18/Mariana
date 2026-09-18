@@ -1,5 +1,9 @@
 import type { MarianaResponse } from "../schemas/mariana-response-schema";
 import {
+	COMMERCIAL_HANDOFF,
+	type CommercialAccessResolution,
+} from "./commercial-policy";
+import {
 	hasRetrievedEvidence,
 	requiresSpecificCommercialEvidence,
 } from "./retrieve";
@@ -15,17 +19,24 @@ const UNSUPPORTED_COMMERCIAL_CLAIMS = [
 	/\bem ate \d+ meses\b/i,
 ];
 
-const CONSULTANT_FALLBACK =
-	"Essa é uma questão específica da operação e precisa ser analisada por um consultor. Posso encaminhar você para esse atendimento.";
+const CONSULTANT_FALLBACK = COMMERCIAL_HANDOFF;
+
+const LEVEL_TWO_RESTRICTIONS = [
+	/\b\d+(?:[.,]\d+)?\s*(?:%|mil|milhao|milhoes|reais|r\$)?\b/i,
+	/\b(?:simulacao|simular|lance de|percentual|media de lance)\b/i,
+	/\b(?:recomendo|indico|sugiro|melhor grupo|melhor carta|estrategia para voce)\b/i,
+];
 
 export function validateMarianaEvidence({
 	query,
 	response,
 	retrieval,
+	commercialAccess,
 }: {
 	query: string;
 	response: MarianaResponse;
 	retrieval: KnowledgeRetrievalResult;
+	commercialAccess?: CommercialAccessResolution;
 }): MarianaResponse {
 	const evidenceUsed = response.evidenceUsed ?? [];
 	if (evidenceUsed.some((id) => !hasRetrievedEvidence(id, retrieval))) {
@@ -40,8 +51,15 @@ export function validateMarianaEvidence({
 		)
 	);
 	const needsSpecificEvidence = requiresSpecificCommercialEvidence(query);
+	const normalizedReply = response.reply
+		.normalize("NFD")
+		.replace(/[\u0300-\u036f]/g, "");
+	const levelTwoViolation =
+		commercialAccess?.level === 2 &&
+		LEVEL_TWO_RESTRICTIONS.some((pattern) => pattern.test(normalizedReply));
 
 	if (
+		levelTwoViolation ||
 		(unsupportedClaim && !retrieval.evidenceFound) ||
 		(needsSpecificEvidence && !retrieval.evidenceFound)
 	) {

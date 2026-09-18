@@ -72,6 +72,7 @@ export type ExecuteNextActionResult =
 
 export interface ExecuteNextActionParams {
 	conversationId: string;
+	currentStatus: string;
 	leadId: string;
 	nextAction: NextAction;
 	persistConversationStatus?: (input: {
@@ -83,6 +84,7 @@ export interface ExecuteNextActionParams {
 
 export async function executeNextAction({
 	conversationId,
+	currentStatus,
 	leadId,
 	nextAction,
 	persistConversationStatus = async ({
@@ -134,6 +136,21 @@ export async function executeNextAction({
 	}
 
 	if (normalizedAction === "offer_meeting") {
+		if (currentStatus !== "qualified") {
+			console.info({
+				conversationId: resolvedConversationId,
+				event: "agent_action_blocked",
+				leadId,
+				nextAction: normalizedAction,
+				reason: "lead_not_qualified",
+			});
+
+			return {
+				action: "continue_qualification",
+				status: "executed",
+			};
+		}
+
 		console.info({
 			conversationId: resolvedConversationId,
 			event: "agent_action_executed",

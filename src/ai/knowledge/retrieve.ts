@@ -46,6 +46,7 @@ const toRetrievedItem = (
 	item: KnowledgeItem,
 	relevance: number
 ): RetrievedKnowledgeItem => ({
+	accessLevel: item.accessLevel ?? 1,
 	category: item.category,
 	content: item.content,
 	id: item.id,
