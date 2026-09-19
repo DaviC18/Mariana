@@ -3,8 +3,7 @@
 # ==========================================
 
 node_modules/
-google-calendar-service.ts
-test-google-calendar-service.ts
+
 # ==========================================
 # Environment variables / Secrets
 # ==========================================
