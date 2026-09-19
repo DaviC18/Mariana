@@ -2,9 +2,7 @@
   "version": "8",
   "dialect": "postgres",
   "id": "92113ddd-b7c0-4ce9-989c-07354585a95e",
-  "prevIds": [
-    "81cf4115-7f75-493c-8081-b5e1c33254d6"
-  ],
+  "prevIds": ["81cf4115-7f75-493c-8081-b5e1c33254d6"],
   "ddl": [
     {
       "values": [
@@ -20,10 +18,7 @@
       "schema": "public"
     },
     {
-      "values": [
-        "active",
-        "closed"
-      ],
+      "values": ["active", "closed"],
       "name": "conversation_status",
       "entityType": "enums",
       "schema": "public"
@@ -43,33 +38,19 @@
       "schema": "public"
     },
     {
-      "values": [
-        "new",
-        "qualifying",
-        "qualified",
-        "scheduled"
-      ],
+      "values": ["new", "qualifying", "qualified", "scheduled"],
       "name": "lead_status",
       "entityType": "enums",
       "schema": "public"
     },
     {
-      "values": [
-        "immediate",
-        "short_term",
-        "medium_term",
-        "long_term"
-      ],
+      "values": ["immediate", "short_term", "medium_term", "long_term"],
       "name": "lead_urgency",
       "entityType": "enums",
       "schema": "public"
     },
     {
-      "values": [
-        "user",
-        "assistant",
-        "system"
-      ],
+      "values": ["user", "assistant", "system"],
       "name": "message_role",
       "entityType": "enums",
       "schema": "public"
@@ -955,14 +936,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "leadId"
-      ],
+      "columns": ["leadId"],
       "schemaTo": "public",
       "tableTo": "leads",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "RESTRICT",
       "name": "appointments_leadId_leads_id_fkey",
@@ -972,14 +949,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "consultantId"
-      ],
+      "columns": ["consultantId"],
       "schemaTo": "public",
       "tableTo": "consultants",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "RESTRICT",
       "name": "appointments_consultantId_consultants_id_fkey",
@@ -989,14 +962,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "leadId"
-      ],
+      "columns": ["leadId"],
       "schemaTo": "public",
       "tableTo": "leads",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "conversations_leadId_leads_id_fkey",
@@ -1006,14 +975,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "consultantId"
-      ],
+      "columns": ["consultantId"],
       "schemaTo": "public",
       "tableTo": "consultants",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "google_calendar_connections_consultantId_consultants_id_fkey",
@@ -1023,14 +988,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "conversationId"
-      ],
+      "columns": ["conversationId"],
       "schemaTo": "public",
       "tableTo": "conversations",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "messages_conversationId_conversations_id_fkey",
@@ -1039,9 +1000,7 @@
       "table": "messages"
     },
     {
-      "columns": [
-        "id"
-      ],
+      "columns": ["id"],
       "nameExplicit": false,
       "name": "appointments_pkey",
       "schema": "public",
@@ -1049,9 +1008,7 @@
       "entityType": "pks"
     },
     {
-      "columns": [
-        "id"
-      ],
+      "columns": ["id"],
       "nameExplicit": false,
       "name": "consultants_pkey",
       "schema": "public",
@@ -1059,9 +1016,7 @@
       "entityType": "pks"
     },
     {
-      "columns": [
-        "id"
-      ],
+      "columns": ["id"],
       "nameExplicit": false,
       "name": "conversations_pkey",
       "schema": "public",
@@ -1069,9 +1024,7 @@
       "entityType": "pks"
     },
     {
-      "columns": [
-        "id"
-      ],
+      "columns": ["id"],
       "nameExplicit": false,
       "name": "google_calendar_connections_pkey",
       "schema": "public",
@@ -1079,9 +1032,7 @@
       "entityType": "pks"
     },
     {
-      "columns": [
-        "id"
-      ],
+      "columns": ["id"],
       "nameExplicit": false,
       "name": "leads_pkey",
       "schema": "public",
@@ -1089,9 +1040,7 @@
       "entityType": "pks"
     },
     {
-      "columns": [
-        "id"
-      ],
+      "columns": ["id"],
       "nameExplicit": false,
       "name": "messages_pkey",
       "schema": "public",
@@ -1100,9 +1049,7 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "externalEventId"
-      ],
+      "columns": ["externalEventId"],
       "nullsNotDistinct": false,
       "name": "appointments_externalEventId_key",
       "schema": "public",
@@ -1111,9 +1058,7 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "email"
-      ],
+      "columns": ["email"],
       "nullsNotDistinct": false,
       "name": "consultants_email_key",
       "schema": "public",
@@ -1122,9 +1067,7 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "calendarId"
-      ],
+      "columns": ["calendarId"],
       "nullsNotDistinct": false,
       "name": "consultants_calendarId_key",
       "schema": "public",
@@ -1133,9 +1076,7 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "consultantId"
-      ],
+      "columns": ["consultantId"],
       "nullsNotDistinct": false,
       "name": "google_calendar_connections_consultantId_key",
       "schema": "public",

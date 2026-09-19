@@ -4,6 +4,7 @@ import {
 	appointments,
 	consultants,
 	conversations,
+	googleCalendarConnections,
 	leads,
 	messages,
 } from "./index";
@@ -13,6 +14,7 @@ export const relations = defineRelations(
 		appointments,
 		consultants,
 		conversations,
+		googleCalendarConnections,
 		leads,
 		messages,
 	},
@@ -30,6 +32,10 @@ export const relations = defineRelations(
 
 		consultants: {
 			appointments: r.many.appointments(),
+			googleCalendarConnection: r.one.googleCalendarConnections({
+				from: r.consultants.id,
+				to: r.googleCalendarConnections.consultantId,
+			}),
 		},
 
 		conversations: {
@@ -37,9 +43,16 @@ export const relations = defineRelations(
 				from: r.conversations.leadId,
 				to: r.leads.id,
 			}),
-
 			messages: r.many.messages(),
 		},
+
+		googleCalendarConnections: {
+			consultant: r.one.consultants({
+				from: r.googleCalendarConnections.consultantId,
+				to: r.consultants.id,
+			}),
+		},
+
 		leads: {
 			appointments: r.many.appointments(),
 			conversations: r.many.conversations(),
