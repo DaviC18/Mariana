@@ -28,6 +28,7 @@ import { getConversationMessages } from "./routes/messages/get-conversation-mess
 import { getIdMessages } from "./routes/messages/get-id-messages";
 import { getMessages } from "./routes/messages/get-messages";
 import { getConversatios } from "./routes/conversations/get-conversations";
+import { authGoogle } from "./routes/google-calendar/auth-google";
 
 const app = fastify({
 	logger: loggerConfig,
@@ -58,6 +59,7 @@ app.register(getConversationMessages);
 app.register(createAppointments);
 app.register(getIdAppointments);
 app.register(getAppointments);
+app.register(authGoogle);
 
 app.get("/", async (request) => {
 	request.log.info("something");
