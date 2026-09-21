@@ -1,7 +1,7 @@
 /** biome-ignore-all lint/style/useConsistentTypeDefinitions: <> */
-/** biome-ignore-all assist/source/useSortedKeys: <explanation> */
-/** biome-ignore-all assist/source/organizeImports: <explanation> */
-/** biome-ignore-all lint/correctness/noUnusedImports: <explanation> */
+/** biome-ignore-all assist/source/useSortedKeys: <> */
+/** biome-ignore-all assist/source/organizeImports: <> */
+/** biome-ignore-all lint/correctness/noUnusedImports: <> */
 import { google } from "googleapis";
 
 import { db } from "../../db/connections";
@@ -16,6 +16,22 @@ export type BusyPeriod = {
 export type CalendarAvailability = {
 	calendarId: string;
 	busy: BusyPeriod[];
+};
+
+export type CreateCalendarEventInput = {
+	calendarId: string;
+	summary: string;
+	description?: string;
+	start: Date;
+	end: Date;
+};
+
+export type CreatedCalendarEvent = {
+	id: string;
+	htmlLink?: string;
+	summary?: string;
+	start: string;
+	end: string;
 };
 
 export class GoogleCalendarService {
@@ -102,5 +118,45 @@ export class GoogleCalendarService {
 				busy,
 			};
 		});
+	}
+
+	async createEvent(
+		input: CreateCalendarEventInput
+	): Promise<CreatedCalendarEvent> {
+		if (input.start >= input.end) {
+			throw new Error("O início do evento deve ser anterior ao fim.");
+		}
+
+		const calendar = await this.getCalendarClient();
+
+		const response = await calendar.events.insert({
+			calendarId: input.calendarId,
+			requestBody: {
+				summary: input.summary,
+				description: input.description,
+				start: {
+					dateTime: input.start.toISOString(),
+					timeZone: "America/Sao_Paulo",
+				},
+				end: {
+					dateTime: input.end.toISOString(),
+					timeZone: "America/Sao_Paulo",
+				},
+			},
+		});
+
+		const event = response.data;
+
+		if (!(event.id && event.start?.dateTime && event.end?.dateTime)) {
+			throw new Error("Google Calendar não retornou os dados do evento.");
+		}
+
+		return {
+			id: event.id,
+			htmlLink: event.htmlLink ?? undefined,
+			summary: event.summary ?? undefined,
+			start: event.start.dateTime,
+			end: event.end.dateTime,
+		};
 	}
 }
