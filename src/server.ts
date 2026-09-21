@@ -30,6 +30,7 @@ import { getIdMessages } from "./routes/messages/get-id-messages";
 import { getMessages } from "./routes/messages/get-messages";
 import { getConversatios } from "./routes/conversations/get-conversations";
 import { authGoogle } from "./routes/google-calendar/auth-google";
+import { webhookWhatsApp } from "./routes/whatsapp/webhook-whatsapp";
 
 const app = fastify({
 	logger: loggerConfig,
@@ -47,6 +48,7 @@ app.addHook("onResponse", async (request, reply) => {
 });
 
 app.register(fastifyMultipart);
+app.register(webhookWhatsApp);
 app.register(createLeads);
 app.register(getIdLeads);
 app.register(getLeads);

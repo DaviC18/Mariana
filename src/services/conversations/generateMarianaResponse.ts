@@ -2,7 +2,7 @@
 /** biome-ignore-all lint/correctness/noUnusedVariables: <> */
 /** biome-ignore-all assist/source/useSortedKeys: <> */
 
-import type { InferInsertModel, SQL } from "drizzle-orm";
+import type { InferInsertModel, InferSelectModel, SQL } from "drizzle-orm";
 import { and, asc, eq, inArray, lt, lte, or } from "drizzle-orm";
 
 import {
@@ -30,6 +30,7 @@ export interface GenerateMarianaResponseParams {
 
 export interface GenerateMarianaResponseResult {
 	actionResult: Awaited<ReturnType<typeof executeNextAction>>;
+	assistantMessage?: InferSelectModel<typeof messages>;
 	metadata: GenerateMarianaReplyResult["metadata"];
 	result: GenerateMarianaReplyResult["result"];
 }
@@ -308,11 +309,14 @@ export async function generateMarianaResponse({
 			},
 		});
 
-		await tx.insert(messages).values({
-			content: response.result.reply,
-			conversationId: activeConversation.id,
-			role: "assistant",
-		});
+		const [assistantMessage] = await tx
+			.insert(messages)
+			.values({
+				content: response.result.reply,
+				conversationId: activeConversation.id,
+				role: "assistant",
+			})
+			.returning();
 
 		await tx
 			.update(conversations)
@@ -321,11 +325,12 @@ export async function generateMarianaResponse({
 			})
 			.where(eq(conversations.id, activeConversation.id));
 
-		return nextActionResult;
+		return { actionResult: nextActionResult, assistantMessage };
 	});
 
 	return {
-		actionResult,
+		actionResult: actionResult.actionResult,
+		assistantMessage: actionResult.assistantMessage,
 		metadata: response.metadata,
 		result: response.result,
 	};

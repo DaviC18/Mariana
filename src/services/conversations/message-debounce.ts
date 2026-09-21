@@ -64,6 +64,15 @@ export class MessageDebounceCoordinator {
 		return this.pending.has(conversationId);
 	}
 
+	async flush(conversationId: string): Promise<void> {
+		const pending = this.pending.get(conversationId);
+		if (!pending) {
+			return;
+		}
+		clearTimeout(pending.timer);
+		await this.release(conversationId, pending.messages, pending.process);
+	}
+
 	private async release(
 		conversationId: string,
 		messages: DebouncedMessage[],

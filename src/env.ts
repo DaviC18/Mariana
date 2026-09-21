@@ -40,6 +40,12 @@ const envSchema = z.object({
 		.min(30)
 		.max(60)
 		.default(60),
+	WHATSAPP_ACCESS_TOKEN: z.string().min(1),
+	WHATSAPP_APP_SECRET: z.string().min(1),
+	WHATSAPP_GRAPH_API_VERSION: z.string().min(1),
+	WHATSAPP_PHONE_NUMBER_ID: z.string().min(1),
+	WHATSAPP_VERIFY_TOKEN: z.string().min(1),
+	WHATSAPP_WABA_ID: z.string().min(1),
 });
 
 export const env = envSchema.parse({
@@ -56,4 +62,10 @@ export const env = envSchema.parse({
 		process.env.SCHEDULE_CONFIRMATION_MINUTES,
 		60
 	),
+	WHATSAPP_ACCESS_TOKEN: process.env.WHATSAPP_ACCESS_TOKEN,
+	WHATSAPP_APP_SECRET: process.env.WHATSAPP_APP_SECRET,
+	WHATSAPP_GRAPH_API_VERSION: process.env.WHATSAPP_GRAPH_API_VERSION,
+	WHATSAPP_PHONE_NUMBER_ID: process.env.WHATSAPP_PHONE_NUMBER_ID,
+	WHATSAPP_VERIFY_TOKEN: process.env.WHATSAPP_VERIFY_TOKEN,
+	WHATSAPP_WABA_ID: process.env.WHATSAPP_WABA_ID,
 });

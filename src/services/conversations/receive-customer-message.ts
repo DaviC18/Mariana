@@ -5,7 +5,10 @@ import { eq } from "drizzle-orm";
 import { db } from "../../db/connections";
 import { conversations, messages } from "../../db/schema";
 import { env } from "../../env";
-import { generateMarianaResponse } from "./generateMarianaResponse";
+import {
+	type GenerateMarianaResponseResult,
+	generateMarianaResponse,
+} from "./generateMarianaResponse";
 import { MessageDebounceCoordinator } from "./message-debounce";
 
 export const messageDebounceCoordinator = new MessageDebounceCoordinator(
@@ -17,11 +20,16 @@ export async function receiveCustomerMessage({
 	conversationId,
 	externalId,
 	role,
+	onMarianaResponse,
 }: {
 	content: string;
 	conversationId: string;
 	externalId?: string;
 	role: "user" | "assistant" | "system";
+	onMarianaResponse?: (
+		result: GenerateMarianaResponseResult,
+		context: { conversationId: string; leadId: string }
+	) => Promise<void>;
 }) {
 	const [conversation] = await db
 		.select({ id: conversations.id, leadId: conversations.leadId })
@@ -79,7 +87,7 @@ export async function receiveCustomerMessage({
 							: latest,
 					debouncedMessages[0]?.receivedAt ?? message.createdAt
 				);
-				await generateMarianaResponse({
+				const marianaResult = await generateMarianaResponse({
 					currentMessages: debouncedMessages.map(
 						(debouncedMessage) => debouncedMessage.content
 					),
@@ -90,6 +98,13 @@ export async function receiveCustomerMessage({
 					),
 					persistUserMessage: false,
 				});
+
+				if (onMarianaResponse) {
+					await onMarianaResponse(marianaResult, {
+						conversationId,
+						leadId: conversation.leadId,
+					});
+				}
 			},
 		});
 	}
