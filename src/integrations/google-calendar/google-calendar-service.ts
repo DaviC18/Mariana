@@ -1,5 +1,4 @@
 /** biome-ignore-all lint/style/useConsistentTypeDefinitions: <> */
-/** biome-ignore-all lint/suspicious/noExplicitAny: <> */
 /** biome-ignore-all lint/correctness/noUnusedFunctionParameters: <> */
 /** biome-ignore-all assist/source/useSortedKeys: <> */
 /** biome-ignore-all assist/source/organizeImports: <> */
@@ -37,10 +36,6 @@ export type CreatedCalendarEvent = {
 };
 
 export class GoogleCalendarService {
-	[x: string]: any;
-	getCalendarClientFor(calendarId: string) {
-		throw new Error("Method not implemented.");
-	}
 	private async getCalendarClient() {
 		const [connection] = await db
 			.select({

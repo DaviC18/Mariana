@@ -15,6 +15,7 @@ import fastifyMultipart from "@fastify/multipart";
 import { createAppointments } from "./routes/appointments/create-appointments";
 import { getAppointments } from "./routes/appointments/get-appointments";
 import { getIdAppointments } from "./routes/appointments/get-id-appointments";
+import { getAppointmentAvailability } from "./routes/appointments/get-availability";
 
 import { createConversations } from "./routes/conversations/create-conversations";
 import { getIdConversations } from "./routes/conversations/get-id-conversations";
@@ -57,6 +58,7 @@ app.register(getIdMessages);
 app.register(getMessages);
 app.register(getConversationMessages);
 app.register(createAppointments);
+app.register(getAppointmentAvailability);
 app.register(getIdAppointments);
 app.register(getAppointments);
 app.register(authGoogle);

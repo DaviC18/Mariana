@@ -1,6 +1,6 @@
 /** biome-ignore-all lint/style/useFilenamingConvention: <> */
-/** biome-ignore-all lint/correctness/noUndeclaredVariables: <explanation> */
-/** biome-ignore-all assist/source/useSortedInterfaceMembers: <explanation> */
+/** biome-ignore-all lint/correctness/noUndeclaredVariables: <> */
+/** biome-ignore-all assist/source/useSortedInterfaceMembers: <> */
 /** biome-ignore-all lint/style/useDestructuring: <> */
 
 import type { GenerateContentResponse } from "@google/genai";

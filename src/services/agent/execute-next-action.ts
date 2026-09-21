@@ -165,6 +165,21 @@ export async function executeNextAction({
 	}
 
 	if (normalizedAction === "schedule_meeting") {
+		if (currentStatus !== "qualified") {
+			console.info({
+				conversationId: resolvedConversationId,
+				event: "agent_action_blocked",
+				leadId,
+				nextAction: normalizedAction,
+				reason: "lead_not_qualified",
+			});
+
+			return {
+				action: "continue_qualification",
+				status: "executed",
+			};
+		}
+
 		console.info({
 			conversationId: resolvedConversationId,
 			event: "agent_action_pending",

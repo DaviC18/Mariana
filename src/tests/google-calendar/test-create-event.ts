@@ -23,21 +23,23 @@ test("cria evento no Google Calendar", async () => {
 	const start = new Date("2026-09-21T18:30:00-03:00");
 	const end = new Date("2026-09-21T19:00:00-03:00");
 
-	const event = await service.createEvent({
-		calendarId: joao.calendarId,
-		description: "Evento criado automaticamente pela Mariana.",
-		end,
-		start,
-		summary: "Teste Mariana - Agendamento",
-	});
+	let eventId: string | undefined;
 
-	console.log("\nEvento criado:");
-	console.log(`ID: ${event.id}`);
-	console.log(`Título: ${event.summary}`);
-	console.log(`Início: ${event.start}`);
-	console.log(`Fim: ${event.end}`);
-	console.log(`Google Calendar: ${event.htmlLink ?? "sem link"}`);
+	try {
+		const event = await service.createEvent({
+			calendarId: joao.calendarId,
+			description: "Evento criado automaticamente pela Mariana.",
+			end,
+			start,
+			summary: "Teste Mariana - Agendamento",
+		});
 
-	assert.ok(event.id);
-	assert.equal(event.summary, "Teste Mariana - Agendamento");
+		eventId = event.id;
+		assert.ok(event.id);
+		assert.equal(event.summary, "Teste Mariana - Agendamento");
+	} finally {
+		if (eventId) {
+			await service.deleteEvent(joao.calendarId, eventId);
+		}
+	}
 });

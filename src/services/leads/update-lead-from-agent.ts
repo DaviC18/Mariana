@@ -31,6 +31,7 @@ export interface UpdateLeadFromAgentInput {
 		birthDate?: Date | null;
 		consortiumType?: string | null;
 		currentSituation?: string | null;
+		interestedInConsultant?: boolean | null;
 		motivation?: string | null;
 		objective?: string | null;
 		painPoint?: string | null;
@@ -49,6 +50,7 @@ export interface UpdateLeadFromAgentInput {
 		status: string;
 		urgency?: string | null;
 	};
+	onPersistedStatus?: (status: LeadStatus) => void;
 	qualifiedAt?: Date;
 }
 
@@ -59,6 +61,7 @@ interface PersistLeadInput {
 		commercialApproach?: (typeof VALID_COMMERCIAL_APPROACHES)[number];
 		consortiumType?: string;
 		currentSituation?: string;
+		interestedInConsultant?: boolean;
 		objective?: string;
 		painPoint?: string;
 		qualifiedAt?: Date;
@@ -124,6 +127,13 @@ function applyNormalizedLeadValues(
 		if (trimmedObjective) {
 			values.objective = trimmedObjective;
 		}
+	}
+
+	if (
+		leadUpdate.interestedInConsultant !== null &&
+		leadUpdate.interestedInConsultant !== undefined
+	) {
+		values.interestedInConsultant = leadUpdate.interestedInConsultant;
 	}
 
 	const normalizedPainPoint = normalizeText(
@@ -209,7 +219,7 @@ async function defaultPersistLead({
 	leadId,
 	values,
 }: PersistLeadInput): Promise<{ id: string }> {
-	const updatePayload: Record<string, string | Date> = {
+	const updatePayload: Record<string, string | boolean | Date> = {
 		status: values.status,
 		updatedAt: values.updatedAt,
 	};
@@ -232,6 +242,10 @@ async function defaultPersistLead({
 
 	if (values.currentSituation !== undefined) {
 		updatePayload.currentSituation = values.currentSituation;
+	}
+
+	if (values.interestedInConsultant !== undefined) {
+		updatePayload.interestedInConsultant = values.interestedInConsultant;
 	}
 
 	if (values.urgency !== undefined) {
@@ -266,6 +280,7 @@ export async function updateLeadFromAgent({
 	interestedInConsultant,
 	leadId,
 	leadUpdate,
+	onPersistedStatus,
 	persistLead = defaultPersistLead,
 	qualifiedAt,
 }: UpdateLeadFromAgentInput & {
@@ -324,5 +339,7 @@ export async function updateLeadFromAgent({
 		values.qualifiedAt = resolvedQualifiedAt;
 	}
 
-	return await persistLead({ leadId, values });
+	const persistedLead = await persistLead({ leadId, values });
+	onPersistedStatus?.(normalizedStatus);
+	return persistedLead;
 }

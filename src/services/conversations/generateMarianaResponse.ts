@@ -1,5 +1,5 @@
 /** biome-ignore-all lint/style/useFilenamingConvention: <> */
-/** biome-ignore-all lint/correctness/noUnusedVariables: <explanation> */
+/** biome-ignore-all lint/correctness/noUnusedVariables: <> */
 /** biome-ignore-all assist/source/useSortedKeys: <> */
 
 import type { InferInsertModel, SQL } from "drizzle-orm";
@@ -87,6 +87,9 @@ async function persistLeadUpdate({
 			...(values.currentSituation === undefined
 				? {}
 				: { currentSituation: values.currentSituation }),
+			...(values.interestedInConsultant === undefined
+				? {}
+				: { interestedInConsultant: values.interestedInConsultant }),
 			...(values.objective === undefined
 				? {}
 				: { objective: values.objective }),
@@ -240,6 +243,7 @@ export async function generateMarianaResponse({
 
 	// 9. Salva resposta da Mariana e aplica a atualização do lead apenas se a transição for permitida
 	const actionResult = await db.transaction(async (tx) => {
+		let updatedLeadStatus: LeadStatus = lead.status as LeadStatus;
 		await updateLeadFromAgent({
 			appointmentCreated,
 			currentStatus: lead.status,
@@ -247,6 +251,7 @@ export async function generateMarianaResponse({
 				birthDate: lead.birthDate,
 				consortiumType: lead.consortiumType,
 				currentSituation: lead.currentSituation,
+				interestedInConsultant: lead.interestedInConsultant,
 				objective: lead.objective,
 				painPoint: lead.painPoint,
 			},
@@ -265,6 +270,9 @@ export async function generateMarianaResponse({
 					tx,
 					values,
 				}),
+			onPersistedStatus: (status) => {
+				updatedLeadStatus = status;
+			},
 		});
 
 		console.log("ACTION INPUT", {
@@ -275,7 +283,7 @@ export async function generateMarianaResponse({
 
 		const nextActionResult = await executeNextAction({
 			conversationId: activeConversation.id,
-			currentStatus: lead.status,
+			currentStatus: updatedLeadStatus,
 			leadId,
 			nextAction: response.result.nextAction,
 			persistConversationStatus: async ({

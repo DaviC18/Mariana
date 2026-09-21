@@ -1,5 +1,6 @@
 /** biome-ignore-all assist/source/useSortedKeys: <> */
 import {
+	boolean,
 	index,
 	pgEnum,
 	pgTable,
@@ -45,6 +46,7 @@ export const leads = pgTable(
 		urgency: leadUrgency(),
 		currentSituation: text(),
 		commercialApproach: leadCommercialApproach(),
+		interestedInConsultant: boolean().notNull().default(false),
 		qualifiedAt: timestamp({ withTimezone: true }),
 		status: leadStatus().notNull().default("new"),
 		createdAt: timestamp({ withTimezone: true }).notNull().defaultNow(),

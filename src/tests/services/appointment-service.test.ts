@@ -1,7 +1,7 @@
 /** biome-ignore-all lint/suspicious/noExplicitAny: <> */
-/** biome-ignore-all lint/style/useDestructuring: <explanation> */
-/** biome-ignore-all assist/source/useSortedKeys: <explanation> */
-/** biome-ignore-all lint/performance/useTopLevelRegex: <explanation> */
+/** biome-ignore-all lint/style/useDestructuring: <> */
+/** biome-ignore-all assist/source/useSortedKeys: <> */
+/** biome-ignore-all lint/performance/useTopLevelRegex: <> */
 
 import assert from "node:assert/strict";
 import test from "node:test";
@@ -43,6 +43,7 @@ test("cria appointment confirmado com evento real no Google Calendar", async () 
 			phone: TEST_PHONE,
 			objective: "Teste de agendamento da Mariana",
 			consortiumType: "automovel",
+			interestedInConsultant: true,
 			status: "qualified",
 			qualifiedAt: new Date(),
 		})
@@ -98,6 +99,14 @@ test("cria appointment confirmado com evento real no Google Calendar", async () 
 		assert.equal(savedAppointment.consultantId, consultant.id);
 		assert.equal(savedAppointment.externalEventId, result.externalEventId);
 		assert.equal(savedAppointment.status, "confirmed");
+
+		const [scheduledLead] = await db
+			.select({ status: leads.status })
+			.from(leads)
+			.where(eq(leads.id, lead.id))
+			.limit(1);
+
+		assert.equal(scheduledLead?.status, "scheduled");
 
 		const availability = await googleCalendarService.getBusyPeriods(
 			[consultant.calendarId],
@@ -159,6 +168,7 @@ test("não cria appointment quando o horário já está ocupado no Google Calend
 			phone: `551198${Date.now().toString().slice(-8)}`,
 			objective: "Teste de conflito de agenda",
 			consortiumType: "automovel",
+			interestedInConsultant: true,
 			status: "qualified",
 			qualifiedAt: new Date(),
 		})
@@ -228,4 +238,30 @@ test("não cria appointment quando o horário já está ocupado no Google Calend
 
 		await db.delete(leads).where(eq(leads.id, lead.id));
 	}
+});
+
+test("rejeita intervalo inválido antes de consultar serviços externos", async () => {
+	await assert.rejects(
+		() =>
+			appointmentService.createConfirmedAppointment({
+				consultantId: "00000000-0000-4000-8000-000000000001",
+				endAt: new Date("2026-10-01T10:00:00-03:00"),
+				leadId: "00000000-0000-4000-8000-000000000002",
+				startAt: new Date("2026-10-01T10:00:00-03:00"),
+			}),
+		/O início do agendamento deve ser anterior ao fim/
+	);
+});
+
+test("rejeita consultor inexistente sem criar evento", async () => {
+	await assert.rejects(
+		() =>
+			appointmentService.createConfirmedAppointment({
+				consultantId: "00000000-0000-4000-8000-000000000001",
+				endAt: new Date("2026-10-01T10:30:00-03:00"),
+				leadId: "00000000-0000-4000-8000-000000000002",
+				startAt: new Date("2026-10-01T10:00:00-03:00"),
+			}),
+		/Consultor não encontrado/
+	);
 });

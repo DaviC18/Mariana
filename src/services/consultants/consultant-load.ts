@@ -1,5 +1,7 @@
 /** biome-ignore-all lint/style/useFilenamingConvention: <> */
 
+import { occupiesAgenda } from "../appointments/appointment-status";
+
 export interface ConsultantCandidate {
 	active: boolean;
 	id: string;
@@ -13,7 +15,7 @@ export interface FindConsultantLoadInput {
 	random?: () => number;
 }
 
-export function findMentorWithLowestLoad({
+export function findConsultantWithLowestLoad({
 	activeLoads,
 	compatibility = () => true,
 	consultants,
@@ -40,3 +42,19 @@ export function findMentorWithLowestLoad({
 
 	return tied[Math.floor(random() * tied.length)] ?? tied[0];
 }
+
+export function buildConsultantLoads(
+	appointments: Array<{ consultantId: string; status: string }>
+): Record<string, number> {
+	return appointments.reduce<Record<string, number>>((loads, appointment) => {
+		if (occupiesAgenda(appointment.status)) {
+			loads[appointment.consultantId] =
+				(loads[appointment.consultantId] ?? 0) + 1;
+		}
+
+		return loads;
+	}, {});
+}
+
+// Compatibility with the name used by the v1 tests.
+export const findMentorWithLowestLoad = findConsultantWithLowestLoad;

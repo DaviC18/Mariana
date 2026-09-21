@@ -1,47 +1,77 @@
-/** biome-ignore-all lint/style/useConsistentTypeDefinitions: <> */
 /** biome-ignore-all lint/style/noParameterProperties: <> */
 
-import { and, eq, gt, lt, or } from "drizzle-orm";
+import { and, eq, gt, inArray, lt } from "drizzle-orm";
 
 import { db } from "../../db/connections";
-import { appointments } from "../../db/schema/appointments";
-import { consultants } from "../../db/schema/consultants";
+import { appointments, consultants, leads } from "../../db/schema";
 import {
 	type CreatedCalendarEvent,
 	GoogleCalendarService,
 } from "../../integrations/google-calendar/google-calendar-service";
+import { AGENDA_OCCUPYING_APPOINTMENT_STATUSES } from "../appointments/appointment-status";
 
-export type CreateAppointmentInput = {
-	leadId: string;
+export interface CreateAppointmentInput {
 	consultantId: string;
-	startAt: Date;
 	endAt: Date;
-};
+	leadId: string;
+	startAt: Date;
+}
 
-export type CreatedAppointment = {
+export interface CreatedAppointment {
 	appointmentId: string;
+	calendarEvent: CreatedCalendarEvent;
 	consultantId: string;
+	endAt: Date;
 	externalEventId: string;
 	startAt: Date;
-	endAt: Date;
 	status: "confirmed";
-	calendarEvent: CreatedCalendarEvent;
-};
+}
+
+export class AppointmentServiceError extends Error {
+	readonly code:
+		| "consultant_inactive"
+		| "consultant_not_found"
+		| "invalid_time_range"
+		| "lead_not_found"
+		| "lead_not_qualified"
+		| "slot_unavailable";
+
+	constructor(
+		code:
+			| "consultant_inactive"
+			| "consultant_not_found"
+			| "invalid_time_range"
+			| "lead_not_found"
+			| "lead_not_qualified"
+			| "slot_unavailable",
+		message: string
+	) {
+		super(message);
+		this.code = code;
+		this.name = "AppointmentServiceError";
+	}
+}
 
 export class AppointmentService {
-	constructor(
-		private readonly googleCalendarService = new GoogleCalendarService()
-	) {}
+	private readonly googleCalendarService: GoogleCalendarService;
+
+	constructor(googleCalendarService = new GoogleCalendarService()) {
+		this.googleCalendarService = googleCalendarService;
+	}
 
 	async createConfirmedAppointment(
 		input: CreateAppointmentInput
 	): Promise<CreatedAppointment> {
 		if (input.startAt >= input.endAt) {
-			throw new Error("O início do agendamento deve ser anterior ao fim.");
+			throw new AppointmentServiceError(
+				"invalid_time_range",
+				"O início do agendamento deve ser anterior ao fim."
+			);
 		}
 
 		const [consultant] = await db
 			.select({
+				active: consultants.active,
 				calendarId: consultants.calendarId,
 				id: consultants.id,
 				name: consultants.name,
@@ -51,30 +81,57 @@ export class AppointmentService {
 			.limit(1);
 
 		if (!consultant) {
-			throw new Error("Consultor não encontrado.");
+			throw new AppointmentServiceError(
+				"consultant_not_found",
+				"Consultor não encontrado."
+			);
 		}
 
-		const conflictingAppointments = await db
-			.select({
-				id: appointments.id,
-			})
+		if (!consultant.active) {
+			throw new AppointmentServiceError(
+				"consultant_inactive",
+				"Consultor indisponível para agendamento."
+			);
+		}
+
+		const [lead] = await db
+			.select({ id: leads.id, status: leads.status })
+			.from(leads)
+			.where(eq(leads.id, input.leadId))
+			.limit(1);
+
+		if (!lead) {
+			throw new AppointmentServiceError(
+				"lead_not_found",
+				"Lead não encontrado."
+			);
+		}
+
+		if (lead.status !== "qualified") {
+			throw new AppointmentServiceError(
+				"lead_not_qualified",
+				"O lead precisa estar qualificado antes do agendamento."
+			);
+		}
+
+		const [conflictingAppointment] = await db
+			.select({ id: appointments.id })
 			.from(appointments)
 			.where(
 				and(
 					eq(appointments.consultantId, input.consultantId),
-					or(
-						eq(appointments.status, "pending_confirmation"),
-						eq(appointments.status, "confirmed"),
-						eq(appointments.status, "scheduled")
-					),
+					inArray(appointments.status, AGENDA_OCCUPYING_APPOINTMENT_STATUSES),
 					lt(appointments.startAt, input.endAt),
 					gt(appointments.endAt, input.startAt)
 				)
 			)
 			.limit(1);
 
-		if (conflictingAppointments.length > 0) {
-			throw new Error("O consultor já possui um agendamento nesse horário.");
+		if (conflictingAppointment) {
+			throw new AppointmentServiceError(
+				"slot_unavailable",
+				"O consultor já possui um agendamento nesse horário."
+			);
 		}
 
 		const [calendarAvailability] =
@@ -85,7 +142,8 @@ export class AppointmentService {
 			);
 
 		if ((calendarAvailability?.busy.length ?? 0) > 0) {
-			throw new Error(
+			throw new AppointmentServiceError(
+				"slot_unavailable",
 				"O horário escolhido não está mais disponível no Google Calendar."
 			);
 		}
@@ -99,28 +157,45 @@ export class AppointmentService {
 		});
 
 		try {
-			const [appointment] = await db
-				.insert(appointments)
-				.values({
-					consultantId: input.consultantId,
-					endAt: input.endAt,
-					externalEventId: calendarEvent.id,
-					leadId: input.leadId,
-					startAt: input.startAt,
-					status: "confirmed",
-				})
-				.returning({
-					consultantId: appointments.consultantId,
-					endAt: appointments.endAt,
-					externalEventId: appointments.externalEventId,
-					id: appointments.id,
-					startAt: appointments.startAt,
-					status: appointments.status,
-				});
+			const appointment = await db.transaction(async (tx) => {
+				const [createdAppointment] = await tx
+					.insert(appointments)
+					.values({
+						consultantId: input.consultantId,
+						endAt: input.endAt,
+						externalEventId: calendarEvent.id,
+						leadId: input.leadId,
+						startAt: input.startAt,
+						status: "confirmed",
+					})
+					.returning({
+						consultantId: appointments.consultantId,
+						endAt: appointments.endAt,
+						externalEventId: appointments.externalEventId,
+						id: appointments.id,
+						startAt: appointments.startAt,
+						status: appointments.status,
+					});
 
-			if (!appointment) {
-				throw new Error("Não foi possível salvar o agendamento.");
-			}
+				if (!createdAppointment) {
+					throw new Error("Não foi possível salvar o agendamento.");
+				}
+
+				const [scheduledLead] = await tx
+					.update(leads)
+					.set({ status: "scheduled", updatedAt: new Date() })
+					.where(and(eq(leads.id, input.leadId), eq(leads.status, "qualified")))
+					.returning({ id: leads.id });
+
+				if (!scheduledLead) {
+					throw new AppointmentServiceError(
+						"lead_not_qualified",
+						"O lead não está mais qualificado para agendamento."
+					);
+				}
+
+				return createdAppointment;
+			});
 
 			return {
 				appointmentId: appointment.id,
@@ -138,7 +213,7 @@ export class AppointmentService {
 					calendarEvent.id
 				);
 			} catch {
-				// O erro original do banco continua sendo o principal.
+				// The original persistence error remains the actionable error.
 			}
 
 			throw error;

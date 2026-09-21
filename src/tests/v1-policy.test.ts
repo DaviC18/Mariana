@@ -3,7 +3,10 @@ import test from "node:test";
 
 import { isConfirmedAppointmentStatus } from "../services/appointments/appointment-status";
 import { createAvailabilityWaitlist } from "../services/availability/waitlist";
-import { findMentorWithLowestLoad } from "../services/consultants/consultant-load";
+import {
+	buildConsultantLoads,
+	findMentorWithLowestLoad,
+} from "../services/consultants/consultant-load";
 import { isGuardrailHit } from "../services/conversations/mariana-safety";
 
 const consultants = [
@@ -46,6 +49,19 @@ test("a distribuição prioriza a menor carga atual de reuniões", () => {
 	});
 
 	assert.equal(selected?.id, "c2");
+});
+
+test("a carga considera somente appointments que ocupam agenda", () => {
+	assert.deepEqual(
+		buildConsultantLoads([
+			{ consultantId: "consultant-1", status: "pending_confirmation" },
+			{ consultantId: "consultant-1", status: "confirmed" },
+			{ consultantId: "consultant-1", status: "completed" },
+			{ consultantId: "consultant-2", status: "scheduled" },
+			{ consultantId: "consultant-2", status: "cancelled" },
+		]),
+		{ "consultant-1": 2, "consultant-2": 1 }
+	);
 });
 
 test("em empate, a escolha usa a ordem atual e preserva o fallback por ordem de chegada", () => {
