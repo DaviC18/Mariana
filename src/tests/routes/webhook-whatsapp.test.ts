@@ -18,17 +18,10 @@ import { WhatsAppService } from "../../integrations/whatsapp/whatsapp-service";
 import { webhookWhatsApp } from "../../routes/whatsapp/webhook-whatsapp";
 import { messageDebounceCoordinator } from "../../services/conversations/receive-customer-message";
 
-function buildApp(loggedStatusEvents?: unknown[]) {
+function buildApp() {
 	const app = fastify().withTypeProvider<ZodTypeProvider>();
 	app.setValidatorCompiler(validatorCompiler);
 	app.setSerializerCompiler(serializerCompiler);
-	if (loggedStatusEvents) {
-		app.addHook("onRequest", async (request) => {
-			request.log.info = ((event: unknown) => {
-				loggedStatusEvents.push(event);
-			}) as typeof request.log.info;
-		});
-	}
 	app.register(webhookWhatsApp);
 	return app;
 }
@@ -87,13 +80,8 @@ test("POST /webhooks/whatsapp - rejeita requisição com assinatura inválida", 
 	assert.equal(response.statusCode, 401);
 });
 
-async function assertStatusEvent(
-	t: test.TestContext,
-	status: string,
-	errors?: Array<{ code?: number; message?: string; title?: string }>
-) {
-	const loggedStatusEvents: unknown[] = [];
-	const app = buildApp(loggedStatusEvents);
+test("POST /webhooks/whatsapp - ignora eventos não relevantes rapidamente com status 200", async (t) => {
+	const app = buildApp();
 	t.after(() => app.close());
 
 	const statusPayload = JSON.stringify({
@@ -112,9 +100,8 @@ async function assertStatusEvent(
 								{
 									id: "wamid.status123",
 									recipient_id: "5511988888888",
-									status,
+									status: "delivered",
 									timestamp: "1700000000",
-									...(errors ? { errors } : {}),
 								},
 							],
 						},
@@ -137,42 +124,6 @@ async function assertStatusEvent(
 	});
 
 	assert.equal(response.statusCode, 200);
-	assert.deepEqual(loggedStatusEvents, [
-		{
-			event: "whatsapp_message_status",
-			messageId: "wamid.status123",
-			status,
-			timestamp: "1700000000",
-			recipientId: "5511988888888",
-			...(errors ? { errors } : {}),
-		},
-	]);
-}
-
-test("POST /webhooks/whatsapp - registra status sent", async (t) => {
-	await assertStatusEvent(t, "sent");
-});
-
-test("POST /webhooks/whatsapp - registra status delivered", async (t) => {
-	await assertStatusEvent(t, "delivered");
-});
-
-test("POST /webhooks/whatsapp - registra status read", async (t) => {
-	await assertStatusEvent(t, "read");
-});
-
-test("POST /webhooks/whatsapp - registra status failed com erro", async (t) => {
-	await assertStatusEvent(t, "failed", [
-		{
-			code: 131026,
-			title: "Message Undeliverable",
-			message: "Message undeliverable.",
-		},
-	]);
-});
-
-test("POST /webhooks/whatsapp - evento somente de status retorna HTTP 200", async (t) => {
-	await assertStatusEvent(t, "delivered");
 });
 
 test("POST /webhooks/whatsapp - fluxo completo: lead, conversation, inbound, debounce/Mariana, outbound e idempotência", async (t) => {

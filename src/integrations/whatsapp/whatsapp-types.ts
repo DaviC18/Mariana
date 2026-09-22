@@ -26,11 +26,6 @@ export interface WhatsAppMessage {
 }
 
 export interface WhatsAppStatus {
-	errors?: Array<{
-		code?: number;
-		title?: string;
-		message?: string;
-	}>;
 	id: string;
 	recipient_id: string;
 	status: string;

@@ -85,19 +85,6 @@ export const webhookWhatsApp: FastifyPluginCallbackZod = (app, _opts, done) => {
 			}
 			for (const change of entry.changes) {
 				const { value } = change;
-				if (value?.statuses) {
-					for (const status of value.statuses) {
-						request.log.info({
-							event: "whatsapp_message_status",
-							messageId: status.id,
-							status: status.status,
-							timestamp: status.timestamp,
-							recipientId: status.recipient_id,
-							...(status.errors ? { errors: status.errors } : {}),
-						});
-					}
-				}
-
 				if (!value?.messages || value.messages.length === 0) {
 					continue;
 				}
