@@ -1,5 +1,13 @@
 /** biome-ignore-all assist/source/useSortedKeys: <> */
-import { index, pgEnum, pgTable, timestamp, uuid } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
+import {
+	index,
+	pgEnum,
+	pgTable,
+	timestamp,
+	uniqueIndex,
+	uuid,
+} from "drizzle-orm/pg-core";
 
 import { conversations } from "./conversations";
 import { leads } from "./leads";
@@ -35,5 +43,8 @@ export const schedulingSessions = pgTable(
 			table.conversationId
 		),
 		statusIdx: index("scheduling_sessions_status_idx").on(table.status),
+		activeLeadUnique: uniqueIndex("scheduling_sessions_one_active_lead_unique")
+			.on(table.leadId)
+			.where(sql`${table.status} = 'active'`),
 	})
 );

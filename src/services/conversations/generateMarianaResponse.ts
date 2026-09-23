@@ -15,6 +15,7 @@ import { executeNextAction } from "../agent/execute-next-action";
 import { CONFIRMED_APPOINTMENT_STATUSES } from "../appointments/appointment-status";
 import type { ConsultantAvailableSlot } from "../calendar/consultant-availability";
 import { SchedulingAvailabilityService } from "../calendar/scheduling-availability";
+import { SchedulingOfferService } from "../calendar/scheduling-offer-service";
 import type { LeadStatus } from "../leads/lead-status";
 import { updateLeadFromAgent } from "../leads/update-lead-from-agent";
 
@@ -30,6 +31,7 @@ export interface GenerateMarianaResponseParams {
 	messageIds?: string[];
 	persistUserMessage?: boolean;
 	schedulingAvailabilityService?: SchedulingAvailabilityService;
+	schedulingOfferService?: SchedulingOfferService;
 }
 
 export interface GenerateMarianaResponseResult {
@@ -155,6 +157,7 @@ export async function generateMarianaResponse({
 	currentMessages,
 	persistUserMessage = true,
 	schedulingAvailabilityService = new SchedulingAvailabilityService(),
+	schedulingOfferService = new SchedulingOfferService(),
 	generateMarianaReplyFn = generateMarianaReply,
 }: GenerateMarianaResponseParams): Promise<GenerateMarianaResponseResult> {
 	// 1. Busca o lead
@@ -384,19 +387,31 @@ export async function generateMarianaResponse({
 			throw new Error("Assistant message not found");
 		}
 
-		const [updatedAssistantMessage] = await db
-			.update(messages)
-			.set({
-				content: finalReply,
-			})
-			.where(eq(messages.id, actionResult.assistantMessage.id))
-			.returning();
+		if (offeredSlots.length > 0) {
+			const persistedOffer = await schedulingOfferService.persistOffer({
+				conversationId: activeConversation.id,
+				finalReply,
+				leadId,
+				messageId: actionResult.assistantMessage.id,
+				offeredSlots,
+			});
 
-		if (!updatedAssistantMessage) {
-			throw new Error("Assistant message not found");
+			finalAssistantMessage = persistedOffer.updatedAssistantMessage;
+		} else {
+			const [updatedAssistantMessage] = await db
+				.update(messages)
+				.set({
+					content: finalReply,
+				})
+				.where(eq(messages.id, actionResult.assistantMessage.id))
+				.returning();
+
+			if (!updatedAssistantMessage) {
+				throw new Error("Assistant message not found");
+			}
+
+			finalAssistantMessage = updatedAssistantMessage;
 		}
-
-		finalAssistantMessage = updatedAssistantMessage;
 	}
 
 	return {
