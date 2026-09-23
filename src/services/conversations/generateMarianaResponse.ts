@@ -13,6 +13,8 @@ import { db } from "../../db/connections";
 import { appointments, conversations, leads, messages } from "../../db/schema";
 import { executeNextAction } from "../agent/execute-next-action";
 import { CONFIRMED_APPOINTMENT_STATUSES } from "../appointments/appointment-status";
+import type { ConsultantAvailableSlot } from "../calendar/consultant-availability";
+import { SchedulingAvailabilityService } from "../calendar/scheduling-availability";
 import type { LeadStatus } from "../leads/lead-status";
 import { updateLeadFromAgent } from "../leads/update-lead-from-agent";
 
@@ -22,10 +24,12 @@ type PersistLeadTransactionValues = Partial<InferInsertModel<typeof leads>> & {
 
 export interface GenerateMarianaResponseParams {
 	currentMessages: string[];
+	generateMarianaReplyFn?: typeof generateMarianaReply;
 	leadId: string;
 	messageCutoff?: Date;
 	messageIds?: string[];
 	persistUserMessage?: boolean;
+	schedulingAvailabilityService?: SchedulingAvailabilityService;
 }
 
 export interface GenerateMarianaResponseResult {
@@ -114,12 +118,44 @@ async function persistLeadUpdate({
 	return updatedLead;
 }
 
+function formatSchedulingOffer(slots: ConsultantAvailableSlot[]): string {
+	if (slots.length === 0) {
+		return "No momento, não encontrei horários disponíveis nos próximos 5 dias.";
+	}
+
+	const dateFormatter = new Intl.DateTimeFormat("pt-BR", {
+		day: "2-digit",
+		month: "2-digit",
+		year: "numeric",
+		hour: "2-digit",
+		minute: "2-digit",
+		timeZone: "America/Sao_Paulo",
+	});
+
+	const formattedSlots = slots
+		.map(
+			(slot, index) =>
+				`${index + 1}. ${dateFormatter.format(slot.start).replace(",", " às")}`
+		)
+		.join("\n");
+
+	return [
+		"Tenho estes horários disponíveis:",
+		"",
+		formattedSlots,
+		"",
+		"Qual desses horários você prefere?",
+	].join("\n");
+}
+
 export async function generateMarianaResponse({
 	leadId,
 	messageCutoff,
 	messageIds,
 	currentMessages,
 	persistUserMessage = true,
+	schedulingAvailabilityService = new SchedulingAvailabilityService(),
+	generateMarianaReplyFn = generateMarianaReply,
 }: GenerateMarianaResponseParams): Promise<GenerateMarianaResponseResult> {
 	// 1. Busca o lead
 	const [lead] = await db
@@ -222,7 +258,7 @@ export async function generateMarianaResponse({
 	}));
 
 	// 7. Chama a IA
-	const response = await generateMarianaReply({
+	const response = await generateMarianaReplyFn({
 		lead: agentLead,
 		history: agentHistory,
 		currentMessages: agentCurrentMessages,
@@ -276,12 +312,6 @@ export async function generateMarianaResponse({
 			},
 		});
 
-		console.log("ACTION INPUT", {
-			leadId,
-			leadStatusBeforeUpdate: lead.status,
-			nextAction: response.result.nextAction,
-		});
-
 		const nextActionResult = await executeNextAction({
 			conversationId: activeConversation.id,
 			currentStatus: updatedLeadStatus,
@@ -328,10 +358,54 @@ export async function generateMarianaResponse({
 		return { actionResult: nextActionResult, assistantMessage };
 	});
 
+	let finalReply = response.result.reply;
+	let finalAssistantMessage = actionResult.assistantMessage;
+
+	if (
+		actionResult.actionResult.action === "offer_meeting" &&
+		actionResult.actionResult.status === "executed"
+	) {
+		const timeMin = new Date();
+		const timeMax = new Date(timeMin);
+
+		timeMax.setDate(timeMax.getDate() + 5);
+
+		const slots = await schedulingAvailabilityService.getAvailableSlots({
+			leadId,
+			timeMin,
+			timeMax,
+		});
+
+		const offeredSlots = slots.slice(0, 3);
+
+		finalReply = formatSchedulingOffer(offeredSlots);
+
+		if (!actionResult.assistantMessage) {
+			throw new Error("Assistant message not found");
+		}
+
+		const [updatedAssistantMessage] = await db
+			.update(messages)
+			.set({
+				content: finalReply,
+			})
+			.where(eq(messages.id, actionResult.assistantMessage.id))
+			.returning();
+
+		if (!updatedAssistantMessage) {
+			throw new Error("Assistant message not found");
+		}
+
+		finalAssistantMessage = updatedAssistantMessage;
+	}
+
 	return {
 		actionResult: actionResult.actionResult,
-		assistantMessage: actionResult.assistantMessage,
+		assistantMessage: finalAssistantMessage,
 		metadata: response.metadata,
-		result: response.result,
+		result: {
+			...response.result,
+			reply: finalReply,
+		},
 	};
 }

@@ -49,6 +49,7 @@ export interface GenerateMarianaReplyParams {
 	lead: MarianaLead;
 	history: MarianaMessage[];
 	currentMessages: MarianaMessage[];
+	additionalContext?: string;
 }
 
 export interface GenerateMarianaReplyResult {
