@@ -1,9 +1,11 @@
 /** biome-ignore-all lint/style/useConsistentTypeDefinitions: <> */
+/** biome-ignore-all lint/suspicious/noShadow: <> */
 /** biome-ignore-all lint/correctness/noUnusedFunctionParameters: <> */
 /** biome-ignore-all assist/source/useSortedKeys: <> */
 /** biome-ignore-all assist/source/organizeImports: <> */
 /** biome-ignore-all lint/correctness/noUnusedImports: <> */
-import { google } from "googleapis";
+import { calendar } from "googleapis/build/src/apis/calendar";
+import { OAuth2Client } from "googleapis-common";
 
 import { db } from "../../db/connections";
 import { googleCalendarConnections } from "../../db/schema/google-calendar-connections";
@@ -48,7 +50,7 @@ export class GoogleCalendarService {
 			throw new Error("Nenhuma conexão Google Calendar encontrada.");
 		}
 
-		const oauth2Client = new google.auth.OAuth2(
+		const oauth2Client = new OAuth2Client(
 			env.GOOGLE_CLIENT_ID,
 			env.GOOGLE_CLIENT_SECRET,
 			env.GOOGLE_REDIRECT_URI
@@ -58,7 +60,7 @@ export class GoogleCalendarService {
 			refresh_token: connection.refreshToken,
 		});
 
-		return google.calendar({
+		return calendar({
 			version: "v3",
 			auth: oauth2Client,
 		});
@@ -77,9 +79,9 @@ export class GoogleCalendarService {
 			throw new Error("timeMin deve ser anterior a timeMax.");
 		}
 
-		const calendar = await this.getCalendarClient();
+		const calendars = await this.getCalendarClient();
 
-		const response = await calendar.freebusy.query({
+		const response = await calendars.freebusy.query({
 			requestBody: {
 				timeMin: timeMin.toISOString(),
 				timeMax: timeMax.toISOString(),
@@ -162,9 +164,9 @@ export class GoogleCalendarService {
 	}
 
 	async deleteEvent(calendarId: string, eventId: string): Promise<void> {
-		const calendar = await this.getCalendarClient();
+		const calendars = await this.getCalendarClient();
 
-		await calendar.events.delete({
+		await calendars.events.delete({
 			calendarId,
 			eventId,
 		});

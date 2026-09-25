@@ -15,7 +15,10 @@ import { executeNextAction } from "../agent/execute-next-action";
 import { CONFIRMED_APPOINTMENT_STATUSES } from "../appointments/appointment-status";
 import type { ConsultantAvailableSlot } from "../calendar/consultant-availability";
 import { SchedulingAvailabilityService } from "../calendar/scheduling-availability";
-import { SchedulingOfferService } from "../calendar/scheduling-offer-service";
+import {
+	type PersistSchedulingOfferResult,
+	SchedulingOfferService,
+} from "../calendar/scheduling-offer-service";
 import type { LeadStatus } from "../leads/lead-status";
 import { updateLeadFromAgent } from "../leads/update-lead-from-agent";
 
@@ -39,6 +42,7 @@ export interface GenerateMarianaResponseResult {
 	assistantMessage?: InferSelectModel<typeof messages>;
 	metadata: GenerateMarianaReplyResult["metadata"];
 	result: GenerateMarianaReplyResult["result"];
+	schedulingOffer?: PersistSchedulingOfferResult;
 }
 
 export function buildMessageHistoryCondition({
@@ -70,6 +74,7 @@ export function buildMessageHistoryCondition({
 			: cutoffCondition
 	) as SQL;
 }
+
 async function persistLeadUpdate({
 	leadId,
 	values,
@@ -284,6 +289,7 @@ export async function generateMarianaResponse({
 	// 9. Salva resposta da Mariana e aplica a atualização do lead apenas se a transição for permitida
 	const actionResult = await db.transaction(async (tx) => {
 		let updatedLeadStatus: LeadStatus = lead.status as LeadStatus;
+
 		await updateLeadFromAgent({
 			appointmentCreated,
 			currentStatus: lead.status,
@@ -363,6 +369,7 @@ export async function generateMarianaResponse({
 
 	let finalReply = response.result.reply;
 	let finalAssistantMessage = actionResult.assistantMessage;
+	let schedulingOffer: PersistSchedulingOfferResult | undefined;
 
 	if (
 		actionResult.actionResult.action === "offer_meeting" &&
@@ -388,7 +395,7 @@ export async function generateMarianaResponse({
 		}
 
 		if (offeredSlots.length > 0) {
-			const persistedOffer = await schedulingOfferService.persistOffer({
+			schedulingOffer = await schedulingOfferService.persistOffer({
 				conversationId: activeConversation.id,
 				finalReply,
 				leadId,
@@ -396,7 +403,7 @@ export async function generateMarianaResponse({
 				offeredSlots,
 			});
 
-			finalAssistantMessage = persistedOffer.updatedAssistantMessage;
+			finalAssistantMessage = schedulingOffer.updatedAssistantMessage;
 		} else {
 			const [updatedAssistantMessage] = await db
 				.update(messages)
@@ -422,5 +429,6 @@ export async function generateMarianaResponse({
 			...response.result,
 			reply: finalReply,
 		},
+		schedulingOffer,
 	};
 }

@@ -240,6 +240,11 @@ test("Etapa 9 — não consulta disponibilidade quando a ação não é offer_me
 
 	assert.equal(availabilityCalls, 0);
 	assert.equal(result.result.reply, "Claro! Posso explicar como funciona.");
+	assert.equal(
+		result.schedulingOffer,
+		undefined,
+		"Não deve existir oferta estruturada quando a ação não é offer_meeting"
+	);
 
 	await db.delete(messages).where(eq(messages.conversationId, conversation.id));
 	await db.delete(conversations).where(eq(conversations.id, conversation.id));
@@ -301,6 +306,7 @@ test("Etapa 10 — TESTES 1, 2, 3 e 10: persistência de exatamente 3 slots, dad
 
 	// TESTE 10: Mensagem retornada é idêntica à persistida e gerada pelos offeredSlots
 	assert.ok(result.assistantMessage);
+
 	const [persistedAssistantMessage] = await db
 		.select()
 		.from(messages)
@@ -318,6 +324,18 @@ test("Etapa 10 — TESTES 1, 2, 3 e 10: persistência de exatamente 3 slots, dad
 		.limit(1);
 
 	assert.ok(session, "SchedulingSession deve ter sido criada");
+
+	assert.ok(
+		result.schedulingOffer,
+		"A oferta estruturada deve existir quando há horários disponíveis"
+	);
+
+	assert.equal(
+		result.schedulingOffer.session.id,
+		session.id,
+		"A sessão retornada deve ser a mesma sessão persistida"
+	);
+
 	assert.equal(session.status, "active");
 	assert.equal(session.leadId, lead.id);
 	assert.equal(session.conversationId, conversation.id);
@@ -326,6 +344,7 @@ test("Etapa 10 — TESTES 1, 2, 3 e 10: persistência de exatamente 3 slots, dad
 	const sessionCreatedTime = session.createdAt.getTime();
 	const sessionExpiresTime = session.expiresAt.getTime();
 	const diffMinutes = (sessionExpiresTime - sessionCreatedTime) / (60 * 1000);
+
 	assert.ok(
 		Math.abs(diffMinutes - 15) < 0.1,
 		`expiresAt deve ser +15 minutos do createdAt, mas foi ${diffMinutes} min`
@@ -343,6 +362,19 @@ test("Etapa 10 — TESTES 1, 2, 3 e 10: persistência de exatamente 3 slots, dad
 		3,
 		"Apenas 3 slots devem ser persistidos"
 	);
+
+	assert.equal(
+		result.schedulingOffer.slots.length,
+		3,
+		"A oferta estruturada deve conter exatamente 3 slots"
+	);
+
+	assert.deepEqual(
+		result.schedulingOffer.slots.map((slot) => slot.id),
+		persistedSlots.map((slot) => slot.id),
+		"Os slots retornados devem ser exatamente os slots persistidos"
+	);
+
 	assert.deepEqual(
 		persistedSlots.map((s) => s.position),
 		[1, 2, 3],
@@ -351,6 +383,7 @@ test("Etapa 10 — TESTES 1, 2, 3 e 10: persistência de exatamente 3 slots, dad
 
 	// TESTE 2: Dados persistidos correspondem exatamente ao offeredSlots
 	const offeredSlots = slots.slice(0, 3);
+
 	for (let i = 0; i < 3; i += 1) {
 		const expectedSlot = offeredSlots[i];
 		const actualSlot = persistedSlots[i];
@@ -358,10 +391,12 @@ test("Etapa 10 — TESTES 1, 2, 3 e 10: persistência de exatamente 3 slots, dad
 		assert.equal(actualSlot.consultantId, expectedSlot.consultant.id);
 		assert.equal(actualSlot.consultantName, expectedSlot.consultant.name);
 		assert.equal(actualSlot.calendarId, expectedSlot.consultant.calendarId);
+
 		assert.equal(
 			actualSlot.startAt.toISOString(),
 			expectedSlot.start.toISOString()
 		);
+
 		assert.equal(
 			actualSlot.endAt.toISOString(),
 			expectedSlot.end.toISOString()
@@ -370,9 +405,11 @@ test("Etapa 10 — TESTES 1, 2, 3 e 10: persistência de exatamente 3 slots, dad
 
 	// Cleanup
 	await db.delete(messages).where(eq(messages.conversationId, conversation.id));
+
 	await db
 		.delete(schedulingSessions)
 		.where(eq(schedulingSessions.id, session.id));
+
 	await db.delete(conversations).where(eq(conversations.id, conversation.id));
 	await db.delete(leads).where(eq(leads.id, lead.id));
 });
@@ -405,6 +442,12 @@ test("Etapa 10 — TESTE 4: sem disponibilidade (offeredSlots = []) não cria se
 		leadId: lead.id,
 		schedulingAvailabilityService,
 	});
+
+	assert.equal(
+		result.schedulingOffer,
+		undefined,
+		"Não deve existir oferta estruturada quando não há disponibilidade"
+	);
 
 	assert.match(
 		result.result.reply,
@@ -456,6 +499,8 @@ test("Etapa 10 — TESTE 5: nova oferta para lead que já possui session active 
 		.from(consultants)
 		.where(eq(consultants.active, true))
 		.limit(3);
+
+	assert.ok(dbConsultants.length >= 3);
 
 	const slotsOffer1 = [
 		buildSlot(
@@ -511,11 +556,13 @@ test("Etapa 10 — TESTE 5: nova oferta para lead que já possui session active 
 
 	assert.equal(allSessions.length, 2, "Devem existir duas sessões");
 	assert.equal(allSessions[0].id, firstSession.id);
+
 	assert.equal(
 		allSessions[0].status,
 		"closed",
 		"Primeira sessão deve ter sido alterada para closed"
 	);
+
 	assert.equal(
 		allSessions[1].status,
 		"active",
@@ -523,6 +570,7 @@ test("Etapa 10 — TESTE 5: nova oferta para lead que já possui session active 
 	);
 
 	const activeSessions = allSessions.filter((s) => s.status === "active");
+
 	assert.equal(
 		activeSessions.length,
 		1,
@@ -531,9 +579,11 @@ test("Etapa 10 — TESTE 5: nova oferta para lead que já possui session active 
 
 	// Cleanup
 	await db.delete(messages).where(eq(messages.conversationId, conversation.id));
+
 	await db
 		.delete(schedulingSessions)
 		.where(eq(schedulingSessions.leadId, lead.id));
+
 	await db.delete(conversations).where(eq(conversations.id, conversation.id));
 	await db.delete(leads).where(eq(leads.id, lead.id));
 });
@@ -558,18 +608,26 @@ test("Etapa 10 — TESTE 6: ação diferente de offer_meeting (continue_qualific
 	assert.ok(conversation);
 
 	const schedulingAvailabilityService = new SchedulingAvailabilityService();
+
 	let availabilityCalled = false;
+
 	schedulingAvailabilityService.getAvailableSlots = async () => {
 		availabilityCalled = true;
 		return [];
 	};
 
-	await generateMarianaResponse({
+	const result = await generateMarianaResponse({
 		currentMessages: ["Ainda tenho dúvidas sobre parcelas."],
 		generateMarianaReplyFn: async () => ({
-			metadata: { latencyMs: 1, model: "test-model", usage: null },
+			metadata: {
+				latencyMs: 1,
+				model: "test-model",
+				usage: null,
+			},
 			result: {
-				leadUpdate: { status: "qualified" },
+				leadUpdate: {
+					status: "qualified",
+				},
 				nextAction: "continue_qualification",
 				reply: "Posso tirar suas dúvidas sobre as parcelas.",
 			},
@@ -582,6 +640,12 @@ test("Etapa 10 — TESTE 6: ação diferente de offer_meeting (continue_qualific
 		availabilityCalled,
 		false,
 		"SchedulingAvailabilityService não deve ser chamado"
+	);
+
+	assert.equal(
+		result.schedulingOffer,
+		undefined,
+		"Não deve existir oferta estruturada para continue_qualification"
 	);
 
 	const sessions = await db
@@ -597,6 +661,139 @@ test("Etapa 10 — TESTE 6: ação diferente de offer_meeting (continue_qualific
 
 	// Cleanup
 	await db.delete(messages).where(eq(messages.conversationId, conversation.id));
+	await db.delete(conversations).where(eq(conversations.id, conversation.id));
+	await db.delete(leads).where(eq(leads.id, lead.id));
+});
+
+test("Etapa 10 — oferta estruturada com exatamente 1 slot", async () => {
+	const testPhone = `551193${Date.now().toString().slice(-8)}`;
+
+	const [lead] = await db
+		.insert(leads)
+		.values(buildQualifiedLeadValues(testPhone))
+		.returning({ id: leads.id });
+
+	assert.ok(lead);
+
+	const [conversation] = await db
+		.insert(conversations)
+		.values({
+			leadId: lead.id,
+		})
+		.returning({ id: conversations.id });
+
+	assert.ok(conversation);
+
+	const [consultant] = await db
+		.select({
+			calendarId: consultants.calendarId,
+			id: consultants.id,
+			name: consultants.name,
+		})
+		.from(consultants)
+		.where(eq(consultants.active, true))
+		.limit(1);
+
+	assert.ok(consultant);
+
+	const offeredSlot = buildSlot(
+		consultant.id,
+		consultant.name,
+		"2026-09-25T14:00:00.000Z"
+	);
+
+	const schedulingAvailabilityService = new SchedulingAvailabilityService();
+
+	schedulingAvailabilityService.getAvailableSlots = async () => [offeredSlot];
+
+	const result = await generateMarianaResponse({
+		currentMessages: ["Pode me passar o horário disponível?"],
+		generateMarianaReplyFn: async ({ lead: l }) => buildAiResponse(l),
+		leadId: lead.id,
+		schedulingAvailabilityService,
+	});
+
+	assert.ok(
+		result.schedulingOffer,
+		"A oferta estruturada deve existir quando há 1 horário disponível"
+	);
+
+	assert.equal(
+		result.schedulingOffer.slots.length,
+		1,
+		"A oferta estruturada deve conter exatamente 1 slot"
+	);
+
+	const [persistedSession] = await db
+		.select()
+		.from(schedulingSessions)
+		.where(eq(schedulingSessions.leadId, lead.id))
+		.limit(1);
+
+	assert.ok(persistedSession);
+
+	const persistedSlots = await db
+		.select()
+		.from(schedulingSlots)
+		.where(eq(schedulingSlots.schedulingSessionId, persistedSession.id))
+		.orderBy(schedulingSlots.position);
+
+	assert.equal(
+		persistedSlots.length,
+		1,
+		"Exatamente 1 slot deve ser persistido"
+	);
+
+	assert.equal(
+		result.schedulingOffer.session.id,
+		persistedSession.id,
+		"A sessão retornada deve ser a sessão persistida"
+	);
+
+	assert.equal(
+		result.schedulingOffer.slots[0].id,
+		persistedSlots[0].id,
+		"O slot retornado deve ser o mesmo slot persistido"
+	);
+
+	assert.equal(
+		result.schedulingOffer.slots[0].consultantId,
+		offeredSlot.consultant.id
+	);
+
+	assert.equal(
+		result.schedulingOffer.slots[0].consultantName,
+		offeredSlot.consultant.name
+	);
+
+	assert.equal(
+		result.schedulingOffer.slots[0].calendarId,
+		offeredSlot.consultant.calendarId
+	);
+
+	assert.equal(
+		result.schedulingOffer.slots[0].startAt.toISOString(),
+		offeredSlot.start.toISOString()
+	);
+
+	assert.equal(
+		result.schedulingOffer.slots[0].endAt.toISOString(),
+		offeredSlot.end.toISOString()
+	);
+
+	assert.match(result.result.reply, /Tenho estes horários disponíveis:/);
+
+	assert.match(result.result.reply, /1\./);
+
+	assert.doesNotMatch(result.result.reply, /2\./);
+	assert.doesNotMatch(result.result.reply, /3\./);
+
+	await db.delete(messages).where(eq(messages.conversationId, conversation.id));
+
+	await db
+		.delete(schedulingSessions)
+		.where(eq(schedulingSessions.leadId, lead.id));
+
 	await db.delete(conversations).where(eq(conversations.id, conversation.id));
 	await db.delete(leads).where(eq(leads.id, lead.id));
 });

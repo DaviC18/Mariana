@@ -6,12 +6,18 @@
 import { and, eq } from "drizzle-orm";
 import type { FastifyPluginCallbackZod } from "fastify-type-provider-zod";
 import z from "zod";
+
 import { db } from "../../db/connections";
 import { conversations, leads, messages } from "../../db/schema";
 import { env } from "../../env";
 import { whatsAppService } from "../../integrations/whatsapp/whatsapp-service";
 import type { WhatsAppWebhookPayload } from "../../integrations/whatsapp/whatsapp-types";
+import { SchedulingChoiceService } from "../../services/calendar/scheduling-choice-service";
+import { SchedulingConfirmationService } from "../../services/calendar/scheduling-confirmation-service";
 import { receiveCustomerMessage } from "../../services/conversations/receive-customer-message";
+
+const schedulingChoiceService = new SchedulingChoiceService();
+const schedulingConfirmationService = new SchedulingConfirmationService();
 
 export const webhookWhatsApp: FastifyPluginCallbackZod = (app, _opts, done) => {
 	app.addContentTypeParser(
@@ -20,7 +26,9 @@ export const webhookWhatsApp: FastifyPluginCallbackZod = (app, _opts, done) => {
 		(req, body, doneParsing) => {
 			try {
 				(req as unknown as { rawBody: string }).rawBody = body as string;
+
 				const json = JSON.parse(body as string);
+
 				doneParsing(null, json);
 			} catch (err) {
 				doneParsing(err as Error, undefined);
@@ -45,7 +53,10 @@ export const webhookWhatsApp: FastifyPluginCallbackZod = (app, _opts, done) => {
 			const challenge = request.query["hub.challenge"];
 
 			if (mode === "subscribe" && token === env.WHATSAPP_VERIFY_TOKEN) {
-				request.log.info({ event: "whatsapp_webhook_verified" });
+				request.log.info({
+					event: "whatsapp_webhook_verified",
+				});
+
 				return reply
 					.code(200)
 					.type("text/plain")
@@ -56,7 +67,10 @@ export const webhookWhatsApp: FastifyPluginCallbackZod = (app, _opts, done) => {
 				event: "whatsapp_webhook_verification_failed",
 				token,
 			});
-			return reply.code(403).send({ error: "Forbidden" });
+
+			return reply.code(403).send({
+				error: "Forbidden",
+			});
 		}
 	);
 
@@ -64,41 +78,61 @@ export const webhookWhatsApp: FastifyPluginCallbackZod = (app, _opts, done) => {
 		const signatureHeader = request.headers["x-hub-signature-256"] as
 			| string
 			| undefined;
+
 		const rawBody =
 			(request as unknown as { rawBody?: string }).rawBody ??
 			JSON.stringify(request.body);
 
 		if (!whatsAppService.verifySignature(rawBody, signatureHeader)) {
-			request.log.warn({ event: "whatsapp_webhook_invalid_signature" });
-			return reply.code(401).send({ error: "Invalid signature" });
+			request.log.warn({
+				event: "whatsapp_webhook_invalid_signature",
+			});
+
+			return reply.code(401).send({
+				error: "Invalid signature",
+			});
 		}
 
 		const payload = request.body as WhatsAppWebhookPayload;
 
 		if (payload.object !== "whatsapp_business_account" || !payload.entry) {
-			return reply.code(200).send({ status: "ignored" });
+			return reply.code(200).send({
+				status: "ignored",
+			});
 		}
 
 		for (const entry of payload.entry) {
 			if (!entry.changes) {
 				continue;
 			}
+
 			for (const change of entry.changes) {
 				const { value } = change;
+
 				if (!value?.messages || value.messages.length === 0) {
 					continue;
 				}
 
 				for (const message of value.messages) {
-					if (message.type !== "text" || !message.text?.body) {
+					const isTextMessage =
+						message.type === "text" && Boolean(message.text?.body);
+
+					const isButtonReply =
+						message.type === "interactive" &&
+						message.interactive?.type === "button_reply" &&
+						Boolean(message.interactive.button_reply?.id);
+
+					if (!(isTextMessage || isButtonReply)) {
 						continue;
 					}
 
 					const phone = message.from;
-					const content = message.text.body;
 					const externalId = message.id;
+					const content = message.text?.body;
+					const buttonId = message.interactive?.button_reply?.id;
 
 					const contact = value.contacts?.find((c) => c.wa_id === phone);
+
 					const profileName = contact?.profile?.name;
 
 					let [lead] = await db
@@ -139,7 +173,86 @@ export const webhookWhatsApp: FastifyPluginCallbackZod = (app, _opts, done) => {
 							.returning();
 					}
 
+					/*
+					 * Fluxo determinístico de seleção de horário.
+					 *
+					 * Button reply com UUID puro representa um slot
+					 * persistido. Não passa por Gemini/debounce.
+					 */
+					if (buttonId) {
+						const choiceResult = await schedulingChoiceService.resolveChoice({
+							buttonId,
+							conversationId: conversation.id,
+							leadId: lead.id,
+						});
+
+						if (!choiceResult.ok) {
+							request.log.warn({
+								event: "whatsapp_scheduling_choice_rejected",
+								reason: choiceResult.reason,
+								buttonId,
+								leadId: lead.id,
+								conversationId: conversation.id,
+								externalId,
+							});
+
+							continue;
+						}
+
+						const confirmation =
+							schedulingConfirmationService.buildConfirmationMessage(
+								choiceResult.slot
+							);
+
+						try {
+							const sendResponse =
+								await whatsAppService.sendReplyButtonsMessage(
+									lead.phone,
+									confirmation.body,
+									confirmation.buttons
+								);
+
+							request.log.info({
+								event: "whatsapp_scheduling_confirmation_sent",
+								buttonId,
+								slotId: choiceResult.slot.id,
+								sessionId: choiceResult.session.id,
+								leadId: lead.id,
+								conversationId: conversation.id,
+								externalId,
+								outboundWamid: sendResponse.messages[0]?.id,
+							});
+						} catch (err) {
+							request.log.error(
+								{
+									err,
+									event: "whatsapp_scheduling_confirmation_send_failed",
+									buttonId,
+									slotId: choiceResult.slot.id,
+									sessionId: choiceResult.session.id,
+									leadId: lead.id,
+									conversationId: conversation.id,
+									externalId,
+								},
+								"Failed to send scheduling confirmation to WhatsApp"
+							);
+						}
+
+						continue;
+					}
+
+					/*
+					 * Fluxo textual existente.
+					 *
+					 * Mensagens de texto continuam seguindo
+					 * normalmente pelo receiveCustomerMessage().
+					 */
+					if (!content) {
+						continue;
+					}
+
 					const targetPhone = lead.phone;
+
 					await receiveCustomerMessage({
 						content,
 						conversationId: conversation.id,
@@ -151,11 +264,15 @@ export const webhookWhatsApp: FastifyPluginCallbackZod = (app, _opts, done) => {
 									targetPhone,
 									marianaResult.result.reply
 								);
+
 								const outboundWamid = sendResponse.messages[0]?.id;
+
 								if (outboundWamid && marianaResult.assistantMessage?.id) {
 									await db
 										.update(messages)
-										.set({ externalId: outboundWamid })
+										.set({
+											externalId: outboundWamid,
+										})
 										.where(eq(messages.id, marianaResult.assistantMessage.id));
 								}
 							} catch (err) {
@@ -170,7 +287,9 @@ export const webhookWhatsApp: FastifyPluginCallbackZod = (app, _opts, done) => {
 			}
 		}
 
-		return reply.code(200).send({ status: "ok" });
+		return reply.code(200).send({
+			status: "ok",
+		});
 	});
 
 	done();
