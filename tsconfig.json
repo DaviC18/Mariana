@@ -11,5 +11,9 @@
     "skipLibCheck": true,
     "resolveJsonModule": true
   },
-  "include": ["src", "src/types/**/*.d.ts"]
+  "include": [
+    "src",
+    "src/types/**/*.d.ts",
+    "src/services/availability/waitlist.ts"
+  ]
 }

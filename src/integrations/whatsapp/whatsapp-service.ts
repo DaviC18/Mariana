@@ -1,7 +1,10 @@
 import crypto from "node:crypto";
 import { env } from "../../env";
 import { WhatsAppClient } from "./whatsapp-client";
-import type { WhatsAppSendMessageResponse } from "./whatsapp-types";
+import type {
+	WhatsAppReplyButton,
+	WhatsAppSendMessageResponse,
+} from "./whatsapp-types";
 
 export class WhatsAppService {
 	private readonly client: WhatsAppClient;
@@ -17,6 +20,14 @@ export class WhatsAppService {
 		text: string
 	): Promise<WhatsAppSendMessageResponse> {
 		return await this.client.sendTextMessage(to, text);
+	}
+
+	async sendReplyButtonsMessage(
+		to: string,
+		body: string,
+		buttons: WhatsAppReplyButton[]
+	): Promise<WhatsAppSendMessageResponse> {
+		return await this.client.sendReplyButtonsMessage(to, body, buttons);
 	}
 
 	verifySignature(
