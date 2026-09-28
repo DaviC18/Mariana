@@ -72,6 +72,7 @@ export class SchedulingConfirmationOrchestrator {
 					consultantId: confirmationResult.slot.consultantId,
 					endAt: confirmationResult.slot.endAt,
 					leadId: input.leadId,
+					schedulingSessionId: confirmationResult.session.id,
 					startAt: confirmationResult.slot.startAt,
 				});
 

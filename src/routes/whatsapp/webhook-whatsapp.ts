@@ -12,12 +12,21 @@ import { conversations, leads, messages } from "../../db/schema";
 import { env } from "../../env";
 import { whatsAppService } from "../../integrations/whatsapp/whatsapp-service";
 import type { WhatsAppWebhookPayload } from "../../integrations/whatsapp/whatsapp-types";
+import { SchedulingCancellationService } from "../../services/calendar/scheduling-cancellation-service";
 import { SchedulingChoiceService } from "../../services/calendar/scheduling-choice-service";
+import { SchedulingConfirmationOrchestrator } from "../../services/calendar/scheduling-confirmation-orchestrator";
 import { SchedulingConfirmationService } from "../../services/calendar/scheduling-confirmation-service";
 import { receiveCustomerMessage } from "../../services/conversations/receive-customer-message";
+import { formatSlotDate } from "../../utils/date-formatter";
 
 const schedulingChoiceService = new SchedulingChoiceService();
+
 const schedulingConfirmationService = new SchedulingConfirmationService();
+
+const schedulingConfirmationOrchestrator =
+	new SchedulingConfirmationOrchestrator();
+
+const schedulingCancellationService = new SchedulingCancellationService();
 
 export const webhookWhatsApp: FastifyPluginCallbackZod = (app, _opts, done) => {
 	app.addContentTypeParser(
@@ -174,12 +183,212 @@ export const webhookWhatsApp: FastifyPluginCallbackZod = (app, _opts, done) => {
 					}
 
 					/*
-					 * Fluxo determinístico de seleção de horário.
+					 * Fluxo determinístico de seleção,
+					 * confirmação e cancelamento
+					 * de horário.
 					 *
-					 * Button reply com UUID puro representa um slot
-					 * persistido. Não passa por Gemini/debounce.
+					 * UUID puro:
+					 *   representa um slot persistido.
+					 *
+					 * confirm:<slotId>:
+					 *   confirma o horário selecionado.
+					 *
+					 * cancel:<slotId>:
+					 *   rejeita a confirmação.
+					 *
+					 * Nenhum desses fluxos passa por
+					 * receiveCustomerMessage/debounce/Gemini.
 					 */
+
 					if (buttonId) {
+						/*
+						 * 1. Confirmação explícita
+						 */
+						if (buttonId.startsWith("confirm:")) {
+							const confirmationResult =
+								await schedulingConfirmationOrchestrator.execute({
+									buttonId,
+									conversationId: conversation.id,
+									leadId: lead.id,
+								});
+
+							if (!confirmationResult.ok) {
+								request.log.warn({
+									event: "whatsapp_scheduling_confirmation_rejected",
+									reason: confirmationResult.reason,
+									buttonId,
+									leadId: lead.id,
+									conversationId: conversation.id,
+									externalId,
+								});
+
+								continue;
+							}
+
+							if (confirmationResult.action === "confirm") {
+								const { appointment, slot } = confirmationResult;
+
+								const finalReply = `Agendamento confirmado para ${formatSlotDate(
+									slot.startAt
+								)} com ${slot.consultantName}.`;
+
+								try {
+									const sendResponse = await whatsAppService.sendTextMessage(
+										lead.phone,
+										finalReply
+									);
+
+									const outboundWamid = sendResponse.messages[0]?.id;
+
+									request.log.info({
+										event: "whatsapp_scheduling_confirmed",
+										appointmentId: appointment.appointmentId,
+										conversationId: conversation.id,
+										leadId: lead.id,
+										externalId,
+										outboundWamid,
+									});
+								} catch (err) {
+									request.log.error(
+										{
+											err,
+											event: "whatsapp_scheduling_confirmation_send_failed",
+											appointmentId: appointment.appointmentId,
+											conversationId: conversation.id,
+											leadId: lead.id,
+											externalId,
+										},
+										"Failed to send scheduling confirmation to WhatsApp"
+									);
+								}
+							}
+
+							continue;
+						}
+
+						/*
+						 * 2. Cliente não confirmou
+						 *
+						 * 2/3 slots:
+						 *   reapresenta os mesmos slots.
+						 *
+						 * 1 slot:
+						 *   fecha a sessão.
+						 *
+						 * Nenhuma nova consulta ao
+						 * Google Calendar é feita aqui.
+						 */
+						if (buttonId.startsWith("cancel:")) {
+							const cancellationResult =
+								await schedulingCancellationService.resolveCancellation({
+									buttonId,
+									conversationId: conversation.id,
+									leadId: lead.id,
+								});
+
+							if (!cancellationResult.ok) {
+								request.log.warn({
+									event: "whatsapp_scheduling_cancellation_rejected",
+									reason: cancellationResult.reason,
+									buttonId,
+									leadId: lead.id,
+									conversationId: conversation.id,
+									externalId,
+								});
+
+								continue;
+							}
+
+							if (cancellationResult.action === "reoffer") {
+								const buttons = cancellationResult.slots.map((slot) => ({
+									id: slot.id,
+									title: formatSlotDate(slot.startAt),
+								}));
+
+								try {
+									const sendResponse =
+										await whatsAppService.sendReplyButtonsMessage(
+											lead.phone,
+											"Tudo bem. Tenho estes horários disponíveis:",
+											buttons
+										);
+
+									const outboundWamid = sendResponse.messages[0]?.id;
+
+									request.log.info({
+										event: "whatsapp_scheduling_offer_reoffered",
+										sessionId: cancellationResult.session.id,
+										slotCount: cancellationResult.slots.length,
+										leadId: lead.id,
+										conversationId: conversation.id,
+										externalId,
+										outboundWamid,
+									});
+								} catch (err) {
+									request.log.error(
+										{
+											err,
+											event: "whatsapp_scheduling_reoffer_send_failed",
+											leadId: lead.id,
+											conversationId: conversation.id,
+											sessionId: cancellationResult.session.id,
+											externalId,
+										},
+										"Failed to reoffer scheduling slots to WhatsApp"
+									);
+								}
+
+								continue;
+							}
+
+							/*
+							 * Apenas 1 slot:
+							 * a sessão já foi fechada pelo
+							 * SchedulingCancellationService.
+							 */
+							const finalReply =
+								"Tudo bem. Esse horário não foi confirmado. Quando quiser, podemos consultar novos horários.";
+
+							try {
+								const sendResponse = await whatsAppService.sendTextMessage(
+									lead.phone,
+									finalReply
+								);
+
+								const outboundWamid = sendResponse.messages[0]?.id;
+
+								request.log.info({
+									event:
+										"whatsapp_scheduling_session_closed_after_cancellation",
+									sessionId: cancellationResult.session.id,
+									leadId: lead.id,
+									conversationId: conversation.id,
+									externalId,
+									outboundWamid,
+								});
+							} catch (err) {
+								request.log.error(
+									{
+										err,
+										event: "whatsapp_scheduling_cancellation_send_failed",
+										sessionId: cancellationResult.session.id,
+										leadId: lead.id,
+										conversationId: conversation.id,
+										externalId,
+									},
+									"Failed to send scheduling cancellation message to WhatsApp"
+								);
+							}
+
+							continue;
+						}
+
+						/*
+						 * 3. Seleção de horário
+						 *
+						 * buttonId é o UUID persistido
+						 * do scheduling_slot.
+						 */
 						const choiceResult = await schedulingChoiceService.resolveChoice({
 							buttonId,
 							conversationId: conversation.id,
@@ -244,8 +453,8 @@ export const webhookWhatsApp: FastifyPluginCallbackZod = (app, _opts, done) => {
 					/*
 					 * Fluxo textual existente.
 					 *
-					 * Mensagens de texto continuam seguindo
-					 * normalmente pelo receiveCustomerMessage().
+					 * Somente mensagens de texto chegam aqui.
+					 * Buttons sempre foram tratados acima.
 					 */
 					if (!content) {
 						continue;

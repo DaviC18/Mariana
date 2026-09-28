@@ -3,7 +3,12 @@
 import { and, eq, gt, inArray, lt } from "drizzle-orm";
 
 import { db } from "../../db/connections";
-import { appointments, consultants, leads } from "../../db/schema";
+import {
+	appointments,
+	consultants,
+	leads,
+	schedulingSessions,
+} from "../../db/schema";
 import {
 	type CreatedCalendarEvent,
 	GoogleCalendarService,
@@ -14,6 +19,7 @@ export interface CreateAppointmentInput {
 	consultantId: string;
 	endAt: Date;
 	leadId: string;
+	schedulingSessionId?: string;
 	startAt: Date;
 }
 
@@ -95,7 +101,10 @@ export class AppointmentService {
 		}
 
 		const [lead] = await db
-			.select({ id: leads.id, status: leads.status })
+			.select({
+				id: leads.id,
+				status: leads.status,
+			})
 			.from(leads)
 			.where(eq(leads.id, input.leadId))
 			.limit(1);
@@ -158,6 +167,37 @@ export class AppointmentService {
 
 		try {
 			const appointment = await db.transaction(async (tx) => {
+				/*
+				 * Quando o agendamento veio de uma scheduling session,
+				 * a sessão precisa continuar válida até o momento
+				 * da persistência final.
+				 *
+				 * O fechamento ocorre dentro da mesma transação
+				 * do appointment e da atualização do lead.
+				 */
+				if (input.schedulingSessionId) {
+					const [closedSession] = await tx
+						.update(schedulingSessions)
+						.set({
+							status: "closed",
+							updatedAt: new Date(),
+						})
+						.where(
+							and(
+								eq(schedulingSessions.id, input.schedulingSessionId),
+								eq(schedulingSessions.leadId, input.leadId),
+								eq(schedulingSessions.status, "active")
+							)
+						)
+						.returning({
+							id: schedulingSessions.id,
+						});
+
+					if (!closedSession) {
+						throw new Error("A sessão de agendamento não está mais ativa.");
+					}
+				}
+
 				const [createdAppointment] = await tx
 					.insert(appointments)
 					.values({
@@ -183,9 +223,14 @@ export class AppointmentService {
 
 				const [scheduledLead] = await tx
 					.update(leads)
-					.set({ status: "scheduled", updatedAt: new Date() })
+					.set({
+						status: "scheduled",
+						updatedAt: new Date(),
+					})
 					.where(and(eq(leads.id, input.leadId), eq(leads.status, "qualified")))
-					.returning({ id: leads.id });
+					.returning({
+						id: leads.id,
+					});
 
 				if (!scheduledLead) {
 					throw new AppointmentServiceError(

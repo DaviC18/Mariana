@@ -18,6 +18,7 @@ import { env } from "../../env";
 import { WhatsAppService } from "../../integrations/whatsapp/whatsapp-service";
 import { webhookWhatsApp } from "../../routes/whatsapp/webhook-whatsapp";
 import { SchedulingChoiceService } from "../../services/calendar/scheduling-choice-service";
+import { SchedulingConfirmationOrchestrator } from "../../services/calendar/scheduling-confirmation-orchestrator";
 import { messageDebounceCoordinator } from "../../services/conversations/receive-customer-message";
 
 function buildApp() {
@@ -738,6 +739,189 @@ test("POST /webhooks/whatsapp - button_reply rejeitado pelo SchedulingChoiceServ
 			buttonMessages.length,
 			0,
 			"button_reply rejeitado não deveria passar pelo fluxo conversacional"
+		);
+	} finally {
+		await db.delete(conversations).where(eq(conversations.id, conversation.id));
+
+		await db.delete(leads).where(eq(leads.id, lead.id));
+	}
+});
+
+test("POST /webhooks/whatsapp - botão Confirmar cria appointment e envia confirmação final", async (t) => {
+	const app = buildApp();
+	t.after(() => app.close());
+
+	const testPhone = `55119${Math.floor(
+		10_000_000 + Math.random() * 90_000_000
+	)}`;
+
+	const buttonWamid = `wamid.button_confirm_${Date.now()}_${Math.random()
+		.toString(36)
+		.slice(7)}`;
+
+	const slotId = crypto.randomUUID();
+	const sessionId = crypto.randomUUID();
+	const appointmentId = crypto.randomUUID();
+
+	const startAt = new Date("2026-09-29T10:00:00-03:00");
+	const endAt = new Date("2026-09-29T10:30:00-03:00");
+
+	let receivedConfirmationInput:
+		| Parameters<SchedulingConfirmationOrchestrator["execute"]>[0]
+		| undefined;
+
+	let sentPhone: string | undefined;
+	let sentText: string | undefined;
+
+	const originalExecute = SchedulingConfirmationOrchestrator.prototype.execute;
+
+	const originalSendTextMessage = WhatsAppService.prototype.sendTextMessage;
+
+	SchedulingConfirmationOrchestrator.prototype.execute = async (input) => {
+		receivedConfirmationInput = input;
+
+		return {
+			action: "confirm",
+			appointment: {
+				appointmentId,
+				calendarEvent: {
+					id: "google-event-test",
+				},
+				consultantId: crypto.randomUUID(),
+				endAt,
+				externalEventId: "google-event-test",
+				startAt,
+				status: "confirmed",
+			} as any,
+			ok: true,
+			session: {
+				id: sessionId,
+			} as any,
+			slot: {
+				consultantName: "João Silva",
+				endAt,
+				id: slotId,
+				startAt,
+			} as any,
+		};
+	};
+
+	WhatsAppService.prototype.sendTextMessage = async (to, text) => {
+		sentPhone = to;
+		sentText = text;
+
+		return {
+			contacts: [
+				{
+					input: to,
+					wa_id: to,
+				},
+			],
+			messages: [
+				{
+					id: `wamid.outbound_confirm_${Date.now()}`,
+				},
+			],
+			messaging_product: "whatsapp",
+		};
+	};
+
+	t.after(() => {
+		SchedulingConfirmationOrchestrator.prototype.execute = originalExecute;
+
+		WhatsAppService.prototype.sendTextMessage = originalSendTextMessage;
+	});
+
+	const [lead] = await db
+		.insert(leads)
+		.values({
+			consortiumType: "geral",
+			name: "Cliente Teste Confirmacao",
+			objective: "geral",
+			phone: testPhone,
+			status: "qualified",
+		})
+		.returning();
+
+	assert.ok(lead);
+
+	const [conversation] = await db
+		.insert(conversations)
+		.values({
+			leadId: lead.id,
+		})
+		.returning();
+
+	assert.ok(conversation);
+
+	const payload = JSON.stringify({
+		entry: [
+			{
+				changes: [
+					{
+						field: "messages",
+						value: {
+							contacts: [
+								{
+									profile: {
+										name: "Cliente Teste Confirmacao",
+									},
+									wa_id: testPhone,
+								},
+							],
+							messages: [
+								{
+									from: testPhone,
+									id: buttonWamid,
+									interactive: {
+										button_reply: {
+											id: `confirm:${slotId}`,
+											title: "Confirmar",
+										},
+										type: "button_reply",
+									},
+									timestamp: String(Math.floor(Date.now() / 1000)),
+									type: "interactive",
+								},
+							],
+							messaging_product: "whatsapp",
+							metadata: {
+								display_phone_number: "5511999999999",
+								phone_number_id: "12345",
+							},
+						},
+					},
+				],
+				id: "entry_button_confirm_test",
+			},
+		],
+		object: "whatsapp_business_account",
+	});
+
+	try {
+		const response = await app.inject({
+			headers: {
+				"content-type": "application/json",
+				"x-hub-signature-256": computeSignature(payload),
+			},
+			method: "POST",
+			payload,
+			url: "/webhooks/whatsapp",
+		});
+
+		assert.equal(response.statusCode, 200);
+
+		assert.deepEqual(receivedConfirmationInput, {
+			buttonId: `confirm:${slotId}`,
+			conversationId: conversation.id,
+			leadId: lead.id,
+		});
+
+		assert.equal(sentPhone, testPhone);
+
+		assert.equal(
+			sentText,
+			"Agendamento confirmado para Terça-feira, 29 de setembro às 10:00 com João Silva."
 		);
 	} finally {
 		await db.delete(conversations).where(eq(conversations.id, conversation.id));

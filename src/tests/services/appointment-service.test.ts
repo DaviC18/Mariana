@@ -11,7 +11,9 @@ import { and, eq } from "drizzle-orm";
 import { db } from "../../db/connections";
 import { appointments } from "../../db/schema/appointments";
 import { consultants } from "../../db/schema/consultants";
+import { conversations } from "../../db/schema/conversations";
 import { leads } from "../../db/schema/leads";
+import { schedulingSessions } from "../../db/schema/scheduling-sessions";
 import { GoogleCalendarService } from "../../integrations/google-calendar/google-calendar-service";
 import {
 	AppointmentService,
@@ -264,4 +266,140 @@ test("rejeita consultor inexistente sem criar evento", async () => {
 			}),
 		/Consultor não encontrado/
 	);
+});
+
+test("fecha scheduling session na mesma transação da confirmação do appointment", async () => {
+	const [consultant] = await db
+		.select({
+			active: consultants.active,
+			calendarId: consultants.calendarId,
+			id: consultants.id,
+			name: consultants.name,
+		})
+		.from(consultants)
+		.where(eq(consultants.active, true))
+		.limit(1);
+
+	assert.ok(consultant);
+
+	const testPhone = `55119${Date.now().toString().slice(-8)}`;
+
+	const [lead] = await db
+		.insert(leads)
+		.values({
+			consortiumType: "geral",
+			name: "Lead Teste Session Close",
+			objective: "Teste fechamento session",
+			phone: testPhone,
+			status: "qualified",
+		})
+		.returning({
+			id: leads.id,
+		});
+
+	assert.ok(lead);
+
+	const [conversation] = await db
+		.insert(conversations)
+		.values({
+			leadId: lead.id,
+		})
+		.returning({
+			id: conversations.id,
+		});
+
+	assert.ok(conversation);
+
+	const [session] = await db
+		.insert(schedulingSessions)
+		.values({
+			conversationId: conversation.id,
+			expiresAt: new Date(Date.now() + 15 * 60 * 1000),
+			leadId: lead.id,
+			status: "active",
+		})
+		.returning();
+
+	assert.ok(session);
+
+	const startAt = new Date("2026-10-01T13:00:00.000Z");
+	const endAt = new Date("2026-10-01T13:30:00.000Z");
+
+	const calendarEvent = {
+		id: "google-event-session-close-test",
+	} as any;
+
+	const mockGoogleCalendarService = {
+		getBusyPeriods: async () => [
+			{
+				busy: [],
+				calendarId: consultant.calendarId,
+			},
+		],
+		createEvent: async () => calendarEvent,
+		deleteEvent: async () => undefined,
+	} as any;
+
+	const service = new AppointmentService(mockGoogleCalendarService);
+
+	try {
+		const result = await service.createConfirmedAppointment({
+			consultantId: consultant.id,
+			endAt,
+			leadId: lead.id,
+			schedulingSessionId: session.id,
+			startAt,
+		});
+
+		assert.equal(result.status, "confirmed");
+		assert.equal(result.externalEventId, calendarEvent.id);
+
+		const [updatedSession] = await db
+			.select({
+				status: schedulingSessions.status,
+			})
+			.from(schedulingSessions)
+			.where(eq(schedulingSessions.id, session.id))
+			.limit(1);
+
+		assert.ok(updatedSession);
+		assert.equal(
+			updatedSession.status,
+			"closed",
+			"A scheduling session confirmada deve ficar closed"
+		);
+
+		const [updatedLead] = await db
+			.select({
+				status: leads.status,
+			})
+			.from(leads)
+			.where(eq(leads.id, lead.id))
+			.limit(1);
+
+		assert.ok(updatedLead);
+		assert.equal(updatedLead.status, "scheduled");
+
+		const [createdAppointment] = await db
+			.select({
+				id: appointments.id,
+				status: appointments.status,
+			})
+			.from(appointments)
+			.where(eq(appointments.id, result.appointmentId))
+			.limit(1);
+
+		assert.ok(createdAppointment);
+		assert.equal(createdAppointment.status, "confirmed");
+	} finally {
+		await db.delete(appointments).where(eq(appointments.leadId, lead.id));
+
+		await db
+			.delete(schedulingSessions)
+			.where(eq(schedulingSessions.id, session.id));
+
+		await db.delete(conversations).where(eq(conversations.id, conversation.id));
+
+		await db.delete(leads).where(eq(leads.id, lead.id));
+	}
 });
