@@ -1,8 +1,10 @@
 /** biome-ignore-all lint/suspicious/useAwait: <> */
+/** biome-ignore-all lint/correctness/noUndeclaredVariables: <> */
 
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import test from "node:test";
+import type { GenerateContentResponse } from "@google/genai";
 
 import { eq } from "drizzle-orm";
 import fastify from "fastify";
@@ -12,7 +14,8 @@ import {
 	type ZodTypeProvider,
 } from "fastify-type-provider-zod";
 
-import { db } from "../../db/connections";
+import { ai } from "../../ai/client";
+import { closeDatabase, db } from "../../db/connections";
 import { conversations, leads, messages } from "../../db/schema";
 import { env } from "../../env";
 import { WhatsAppService } from "../../integrations/whatsapp/whatsapp-service";
@@ -41,6 +44,10 @@ function computeSignature(
 		crypto.createHmac("sha256", secret).update(payload).digest("hex")
 	);
 }
+
+test.after(async () => {
+	await closeDatabase();
+});
 
 test("GET /webhooks/whatsapp - validação com token correto retorna challenge", async (t) => {
 	const app = buildApp();
@@ -142,9 +149,21 @@ test("POST /webhooks/whatsapp - ignora eventos não relevantes rapidamente com s
 test("POST /webhooks/whatsapp - fluxo completo: lead, conversation, inbound, debounce/Mariana, outbound e idempotência", async (t) => {
 	const app = buildApp();
 
-	t.after(() => {
-		app.close();
-	});
+	t.after(() => app.close());
+
+	const mockedGeminiResponse = {
+		text: JSON.stringify({
+			businessAction: "ask_next_qualification_question",
+			evidenceUsed: [],
+			leadUpdate: {
+				status: "qualifying",
+			},
+			nextAction: "continue_qualification",
+			reply: "Entendi. Vou continuar seu atendimento.",
+		}),
+	} as GenerateContentResponse;
+
+	t.mock.method(ai.models, "generateContent", async () => mockedGeminiResponse);
 
 	const testPhone = `55119${Math.floor(
 		10_000_000 + Math.random() * 90_000_000

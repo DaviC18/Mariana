@@ -4,7 +4,7 @@ import test from "node:test";
 
 import { eq } from "drizzle-orm";
 
-import { db } from "../../db/connections";
+import { closeDatabase, db } from "../../db/connections";
 import { consultants } from "../../db/schema/consultants";
 import { conversations } from "../../db/schema/conversations";
 import { leads } from "../../db/schema/leads";
@@ -13,6 +13,10 @@ import { schedulingSlots } from "../../db/schema/scheduling-slots";
 import { SchedulingConfirmationService } from "../../services/calendar/scheduling-confirmation-service";
 
 const schedulingConfirmationService = new SchedulingConfirmationService();
+
+test.after(async () => {
+	await closeDatabase();
+});
 
 async function createFixture() {
 	const testPhone = `55119${Math.floor(

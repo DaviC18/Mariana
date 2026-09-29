@@ -8,12 +8,16 @@ import test from "node:test";
 
 import { eq } from "drizzle-orm";
 
-import { db } from "../../db/connections";
+import { closeDatabase, db } from "../../db/connections";
 import { consultants } from "../../db/schema/consultants";
 import { conversations } from "../../db/schema/conversations";
 import { leads } from "../../db/schema/leads";
 import { schedulingSessions } from "../../db/schema/scheduling-sessions";
 import { schedulingSlots } from "../../db/schema/scheduling-slots";
+
+test.after(async () => {
+	await closeDatabase();
+});
 
 test("cria sessão de agendamento válida e verifica defaults", async () => {
 	const TEST_PHONE = `5511900${Date.now().toString().slice(-6)}`;

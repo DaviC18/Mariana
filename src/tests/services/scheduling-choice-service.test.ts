@@ -8,7 +8,7 @@ import test from "node:test";
 
 import { eq } from "drizzle-orm";
 
-import { db } from "../../db/connections";
+import { closeDatabase, db } from "../../db/connections";
 import { consultants } from "../../db/schema/consultants";
 import { conversations } from "../../db/schema/conversations";
 import { leads } from "../../db/schema/leads";
@@ -17,6 +17,10 @@ import { schedulingSlots } from "../../db/schema/scheduling-slots";
 import { SchedulingChoiceService } from "../../services/calendar/scheduling-choice-service";
 
 const schedulingChoiceService = new SchedulingChoiceService();
+
+test.after(async () => {
+	await closeDatabase();
+});
 
 async function createFixture() {
 	const suffix = Date.now().toString();

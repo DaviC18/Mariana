@@ -2,7 +2,7 @@
 /** biome-ignore-all lint/suspicious/useAwait: <> */
 import assert from "node:assert/strict";
 import test from "node:test";
-
+import { closeDatabase } from "../../db/connections";
 import type { schedulingSessions, schedulingSlots } from "../../db/schema";
 import type {
 	AppointmentService,
@@ -68,6 +68,10 @@ function createOrchestrator(
 		appointmentService
 	);
 }
+
+test.after(async () => {
+	await closeDatabase();
+});
 
 test("confirma agendamento e chama AppointmentService com os dados do slot", async () => {
 	const orchestrator = createOrchestrator(

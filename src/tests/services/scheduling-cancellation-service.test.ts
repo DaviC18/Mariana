@@ -7,7 +7,7 @@ import test from "node:test";
 
 import { eq } from "drizzle-orm";
 
-import { db } from "../../db/connections";
+import { closeDatabase, db } from "../../db/connections";
 import {
 	consultants,
 	conversations,
@@ -16,6 +16,10 @@ import {
 	schedulingSlots,
 } from "../../db/schema";
 import { SchedulingCancellationService } from "../../services/calendar/scheduling-cancellation-service";
+
+test.after(async () => {
+	await closeDatabase();
+});
 
 async function createCancellationFixture(slotCount: number) {
 	const testPhone = `55119${Math.floor(

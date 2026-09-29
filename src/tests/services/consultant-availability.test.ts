@@ -1,11 +1,24 @@
+/** biome-ignore-all lint/suspicious/noExplicitAny: <> */
+/** biome-ignore-all lint/style/useDestructuring: <> */
+/** biome-ignore-all assist/source/useSortedKeys: <> */
+
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { db } from "../../db/connections";
+import { closeDatabase, db } from "../../db/connections";
 import { consultants as consultantsTable } from "../../db/schema/consultants";
+import { GoogleCalendarService } from "../../integrations/google-calendar/google-calendar-service";
 import { ConsultantAvailabilityService } from "../../services/calendar/consultant-availability";
 
-test("seleciona o primeiro consultor disponível para cada horário", async () => {
+type GetBusyPeriods = GoogleCalendarService["getBusyPeriods"];
+type GetBusyPeriodsCalendarIds = Parameters<GetBusyPeriods>[0];
+type GetBusyPeriodsDate = Parameters<GetBusyPeriods>[1];
+
+test.after(async () => {
+	await closeDatabase();
+});
+
+test("seleciona o primeiro consultor disponível para cada horário", async (t) => {
 	const consultantRows = await db
 		.select({
 			calendarId: consultantsTable.calendarId,
@@ -26,12 +39,62 @@ test("seleciona o primeiro consultor disponível para cada horário", async () =
 		(consultant) => consultant.name === "João Silva"
 	);
 
-	assert.ok(joao);
+	const maria = consultants.find(
+		(consultant) => consultant.name === "Maria Souza"
+	);
 
-	const service = new ConsultantAvailabilityService();
+	const carlos = consultants.find(
+		(consultant) => consultant.name === "Carlos Oliveira"
+	);
+
+	assert.ok(joao);
+	assert.ok(maria);
+	assert.ok(carlos);
 
 	const timeMin = new Date("2026-09-21T16:30:00-03:00");
 	const timeMax = new Date("2026-09-21T18:00:00-03:00");
+
+	const googleCalendarService = new GoogleCalendarService();
+
+	t.mock.method(
+		googleCalendarService,
+		"getBusyPeriods",
+		async (
+			calendarIds: GetBusyPeriodsCalendarIds,
+			start: GetBusyPeriodsDate,
+			_end: GetBusyPeriodsDate
+		) => {
+			await Promise.resolve();
+
+			const calendarId = calendarIds[0];
+
+			if (calendarId === joao.calendarId) {
+				const firstSlotEnd = new Date(start);
+				firstSlotEnd.setMinutes(firstSlotEnd.getMinutes() + 30);
+
+				return [
+					{
+						busy: [
+							{
+								end: firstSlotEnd.toISOString(),
+								start: start.toISOString(),
+							},
+						],
+						calendarId,
+					},
+				];
+			}
+
+			return [
+				{
+					busy: [],
+					calendarId,
+				},
+			];
+		}
+	);
+
+	const service = new ConsultantAvailabilityService(googleCalendarService);
 
 	const availableSlots = await service.getAvailableConsultants(
 		consultants,

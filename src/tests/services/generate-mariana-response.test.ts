@@ -7,7 +7,7 @@ import test from "node:test";
 import { eq } from "drizzle-orm";
 
 import type { GenerateMarianaReplyResult, MarianaLead } from "../../ai/agent";
-import { db } from "../../db/connections";
+import { closeDatabase, db } from "../../db/connections";
 import {
 	consultants,
 	conversations,
@@ -19,6 +19,10 @@ import {
 import type { ConsultantAvailableSlot } from "../../services/calendar/consultant-availability";
 import { SchedulingAvailabilityService } from "../../services/calendar/scheduling-availability";
 import { generateMarianaResponse } from "../../services/conversations/generateMarianaResponse";
+
+test.after(async () => {
+	await closeDatabase();
+});
 
 function buildQualifiedLeadValues(phone: string) {
 	return {
