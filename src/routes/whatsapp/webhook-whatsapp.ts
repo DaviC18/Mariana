@@ -1,4 +1,5 @@
 /** biome-ignore-all lint/performance/noAwaitInLoops: <> */
+/** biome-ignore-all lint/style/useDestructuring: <> */
 /** biome-ignore-all lint/complexity/noExcessiveCognitiveComplexity: <> */
 /** biome-ignore-all lint/suspicious/useAwait: <> */
 /** biome-ignore-all assist/source/useSortedKeys: <> */
@@ -6,9 +7,8 @@
 import { and, eq } from "drizzle-orm";
 import type { FastifyPluginCallbackZod } from "fastify-type-provider-zod";
 import z from "zod";
-
 import { db } from "../../db/connections";
-import { conversations, leads, messages } from "../../db/schema";
+import { conversations, messages } from "../../db/schema";
 import { env } from "../../env";
 import { whatsAppService } from "../../integrations/whatsapp/whatsapp-service";
 import type { WhatsAppWebhookPayload } from "../../integrations/whatsapp/whatsapp-types";
@@ -17,6 +17,7 @@ import { SchedulingChoiceService } from "../../services/calendar/scheduling-choi
 import { SchedulingConfirmationOrchestrator } from "../../services/calendar/scheduling-confirmation-orchestrator";
 import { SchedulingConfirmationService } from "../../services/calendar/scheduling-confirmation-service";
 import { receiveCustomerMessage } from "../../services/conversations/receive-customer-message";
+import { leadIngestionService } from "../../services/leads/lead-ingestion";
 import { formatSlotDate } from "../../utils/date-formatter";
 
 const schedulingChoiceService = new SchedulingChoiceService();
@@ -144,23 +145,13 @@ export const webhookWhatsApp: FastifyPluginCallbackZod = (app, _opts, done) => {
 
 					const profileName = contact?.profile?.name;
 
-					let [lead] = await db
-						.select()
-						.from(leads)
-						.where(eq(leads.phone, phone))
-						.limit(1);
+					const ingestionResult = await leadIngestionService.ingest({
+						name: profileName,
+						phone,
+						source: "whatsapp",
+					});
 
-					if (!lead) {
-						[lead] = await db
-							.insert(leads)
-							.values({
-								name: profileName || phone,
-								phone,
-								consortiumType: "geral",
-								objective: "geral",
-							})
-							.returning();
-					}
+					const lead = ingestionResult.lead;
 
 					let [conversation] = await db
 						.select()
