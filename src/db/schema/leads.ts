@@ -6,6 +6,7 @@ import {
 	pgTable,
 	text,
 	timestamp,
+	unique,
 	uuid,
 } from "drizzle-orm/pg-core";
 
@@ -33,27 +34,44 @@ export const leadCommercialApproach = pgEnum("lead_commercial_approach", [
 	"general",
 ]);
 
+export const leadSource = pgEnum("lead_source", [
+	"google_ads",
+	"meta_ads",
+	"whatsapp",
+]);
+
 export const leads = pgTable(
 	"leads",
 	{
+		adGroupId: text(),
+		adId: text(),
+		adSetId: text(),
 		birthDate: timestamp({ withTimezone: true }),
-		id: uuid().primaryKey().defaultRandom(),
-		name: text().notNull(),
-		phone: text().notNull(),
-		objective: text().notNull(),
-		consortiumType: text().notNull(),
-		painPoint: text(),
-		urgency: leadUrgency(),
-		currentSituation: text(),
+		campaignId: text(),
 		commercialApproach: leadCommercialApproach(),
-		interestedInConsultant: boolean().notNull().default(false),
-		qualifiedAt: timestamp({ withTimezone: true }),
-		status: leadStatus().notNull().default("new"),
+		consortiumType: text(),
 		createdAt: timestamp({ withTimezone: true }).notNull().defaultNow(),
+		currentSituation: text(),
+		email: text(),
+		gclid: text(),
+		id: uuid().primaryKey().defaultRandom(),
+		interestedInConsultant: boolean().notNull().default(false),
+		name: text().notNull(),
+		objective: text(),
+		painPoint: text(),
+		phone: text().notNull(),
+		qualifiedAt: timestamp({ withTimezone: true }),
+		source: leadSource().notNull().default("whatsapp"),
+		sourceLeadId: text(),
+		status: leadStatus().notNull().default("new"),
 		updatedAt: timestamp({ withTimezone: true }).notNull().defaultNow(),
 	},
 	(table) => ({
 		phoneIdx: index("leads_phone_idx").on(table.phone),
+		sourceLeadUnique: unique("leads_source_source_lead_id_unique").on(
+			table.source,
+			table.sourceLeadId
+		),
 		statusIdx: index("leads_status_idx").on(table.status),
 	})
 );
