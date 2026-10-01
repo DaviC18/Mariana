@@ -11,8 +11,6 @@ node_modules/
 .env
 .env.*
 !.env.example
-.env.example
-
 
 # ==========================================
 # Build / Output
@@ -21,7 +19,6 @@ node_modules/
 dist/
 build/
 out/
-
 
 # ==========================================
 # Logs
@@ -33,7 +30,6 @@ npm-debug.log*
 yarn-debug.log*
 pnpm-debug.log*
 
-
 # ==========================================
 # Coverage / Tests
 # ==========================================
@@ -41,32 +37,26 @@ pnpm-debug.log*
 coverage/
 .nyc_output/
 
-
 # ==========================================
 # TypeScript
 # ==========================================
 
 *.tsbuildinfo
 
-
 # ==========================================
 # Drizzle
 # ==========================================
 
-# DO NOT ignore the Drizzle migrations folder.
-# Migrations must be committed to Git.
-
-# drizzle/meta/
-
+# Do NOT ignore the Drizzle migrations folder.
+# Migrations and snapshots must be committed to Git.
 
 # ==========================================
 # Docker
 # ==========================================
 
-# Persistent container data
+# Local database/container data
 postgres_data/
 pgdata/
-
 
 # ==========================================
 # IDE / Editors
@@ -81,14 +71,12 @@ pgdata/
 *.swp
 *.swo
 
-
 # ==========================================
 # OS
 # ==========================================
 
 .DS_Store
 Thumbs.db
-
 
 # ==========================================
 # Temporary files
