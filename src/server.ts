@@ -31,6 +31,7 @@ import { getMessages } from "./routes/messages/get-messages";
 import { getConversatios } from "./routes/conversations/get-conversations";
 import { authGoogle } from "./routes/google-calendar/auth-google";
 import { webhookWhatsApp } from "./routes/whatsapp/webhook-whatsapp";
+import { googleAdsWebhookRoutes } from "./routes/google-ads/webhook-google-ads";
 
 const app = fastify({
 	logger: loggerConfig,
@@ -64,6 +65,7 @@ app.register(getAppointmentAvailability);
 app.register(getIdAppointments);
 app.register(getAppointments);
 app.register(authGoogle);
+app.register(googleAdsWebhookRoutes);
 
 app.get("/", async (request) => {
 	request.log.info("something");
