@@ -1,5 +1,5 @@
-import crypto from "node:crypto";
 import { env } from "../../env";
+import { verifyWebhookSignature } from "../../utils/verify-webhook-signature";
 import { WhatsAppClient } from "./whatsapp-client";
 import type {
 	WhatsAppReplyButton,
@@ -34,28 +34,11 @@ export class WhatsAppService {
 		rawBody: string | Buffer,
 		signatureHeader: string | undefined
 	): boolean {
-		if (!signatureHeader?.startsWith("sha256=")) {
-			return false;
-		}
-
-		const signature = signatureHeader.slice("sha256=".length);
-		const expectedSignature = crypto
-			.createHmac("sha256", this.appSecret)
-			.update(rawBody)
-			.digest("hex");
-
-		if (signature.length !== expectedSignature.length) {
-			return false;
-		}
-
-		try {
-			return crypto.timingSafeEqual(
-				Buffer.from(signature, "hex"),
-				Buffer.from(expectedSignature, "hex")
-			);
-		} catch {
-			return false;
-		}
+		return verifyWebhookSignature({
+			rawBody,
+			secret: this.appSecret,
+			signatureHeader,
+		});
 	}
 }
 

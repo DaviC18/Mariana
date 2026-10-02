@@ -31,6 +31,8 @@ const envSchema = z.object({
 	GOOGLE_CLIENT_SECRET: z.string().min(1),
 	GOOGLE_REDIRECT_URI: z.string().min(1),
 	MESSAGE_DEBOUNCE_MS: z.coerce.number().int().positive().default(15_000),
+	META_ADS_APP_SECRET: z.string().min(1),
+	META_ADS_VERIFY_TOKEN: z.string().min(1),
 	NODE_ENV: z
 		.enum(["development", "production", "test"])
 		.default("development"),
@@ -58,6 +60,8 @@ export const env = envSchema.parse({
 	GOOGLE_CLIENT_SECRET: process.env.GOOGLE_CLIENT_SECRET,
 	GOOGLE_REDIRECT_URI: process.env.GOOGLE_REDIRECT_URI,
 	MESSAGE_DEBOUNCE_MS: parseIntegerEnv(process.env.MESSAGE_DEBOUNCE_MS, 15_000),
+	META_ADS_APP_SECRET: process.env.META_ADS_APP_SECRET,
+	META_ADS_VERIFY_TOKEN: process.env.META_ADS_VERIFY_TOKEN,
 	NODE_ENV: process.env.NODE_ENV,
 	PORT: parseIntegerEnv(process.env.PORT, 3252),
 	SCHEDULE_CONFIRMATION_MINUTES: parseIntegerEnv(
