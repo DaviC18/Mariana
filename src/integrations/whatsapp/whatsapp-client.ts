@@ -17,15 +17,22 @@ export class WhatsAppClient {
 
 	constructor(options?: WhatsAppClientOptions) {
 		this.accessToken = options?.accessToken ?? env.WHATSAPP_ACCESS_TOKEN;
-		this.apiVersion = options?.apiVersion ?? env.WHATSAPP_GRAPH_API_VERSION;
+		const rawVersion = options?.apiVersion ?? env.WHATSAPP_GRAPH_API_VERSION;
+		this.apiVersion = rawVersion.startsWith("v")
+			? rawVersion
+			: `v${rawVersion}`;
 		this.phoneNumberId = options?.phoneNumberId ?? env.WHATSAPP_PHONE_NUMBER_ID;
+	}
+
+	private get messagesUrl(): string {
+		return `https://graph.facebook.com/${this.apiVersion}/${this.phoneNumberId}/messages`;
 	}
 
 	async sendTextMessage(
 		to: string,
 		text: string
 	): Promise<WhatsAppSendMessageResponse> {
-		const url = `https://graph.facebook.com/${this.apiVersion}/${this.phoneNumberId}/messages`;
+		const url = this.messagesUrl;
 
 		const payload = {
 			messaging_product: "whatsapp",
@@ -88,12 +95,7 @@ export class WhatsAppClient {
 			);
 		}
 
-		const url =
-			"https://graph.facebook.com/" +
-			this.apiVersion +
-			"/" +
-			this.phoneNumberId +
-			"/messages";
+		const url = this.messagesUrl;
 		const payload = {
 			interactive: {
 				action: {
