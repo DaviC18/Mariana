@@ -16,12 +16,20 @@ import {
 
 import { ai } from "../../ai/client";
 import { closeDatabase, db } from "../../db/connections";
-import { conversations, leads, messages } from "../../db/schema";
+import {
+	consultants,
+	conversations,
+	leads,
+	messages,
+	schedulingSessions,
+	schedulingSlots,
+} from "../../db/schema";
 import { env } from "../../env";
 import { WhatsAppService } from "../../integrations/whatsapp/whatsapp-service";
 import { webhookWhatsApp } from "../../routes/whatsapp/webhook-whatsapp";
 import { SchedulingChoiceService } from "../../services/calendar/scheduling-choice-service";
 import { SchedulingConfirmationOrchestrator } from "../../services/calendar/scheduling-confirmation-orchestrator";
+import { SchedulingAvailabilityService } from "../../services/calendar/scheduling-availability";
 import { messageDebounceCoordinator } from "../../services/conversations/receive-customer-message";
 
 function buildApp() {
@@ -945,6 +953,160 @@ test("POST /webhooks/whatsapp - botão Confirmar cria appointment e envia confir
 	} finally {
 		await db.delete(conversations).where(eq(conversations.id, conversation.id));
 
+		await db.delete(leads).where(eq(leads.id, lead.id));
+	}
+});
+
+test("POST /webhooks/whatsapp - oferta de agenda envia os slots persistidos como botões", async (t) => {
+	const app = buildApp();
+	t.after(() => app.close());
+
+	const testPhone = `55119${Math.floor(10_000_000 + Math.random() * 90_000_000)}`;
+	const inboundWamid = `wamid.offer_${Date.now()}`;
+	const [consultant] = await db
+		.select()
+		.from(consultants)
+		.where(eq(consultants.active, true))
+		.limit(1);
+	assert.ok(consultant);
+
+	const [lead] = await db
+		.insert(leads)
+		.values({
+			consortiumType: "imóvel",
+			interestedInConsultant: true,
+			name: "Cliente Oferta Interativa",
+			objective: "Comprar imóvel",
+			phone: testPhone,
+			status: "qualified",
+		})
+		.returning();
+	assert.ok(lead);
+
+	const [conversation] = await db
+		.insert(conversations)
+		.values({ leadId: lead.id })
+		.returning();
+	assert.ok(conversation);
+
+	const availableSlot = {
+		consultant: {
+			calendarId: consultant.calendarId,
+			id: consultant.id,
+			name: consultant.name,
+		},
+		end: new Date("2026-11-10T13:30:00.000Z"),
+		start: new Date("2026-11-10T13:00:00.000Z"),
+	};
+	const originalAvailability =
+		SchedulingAvailabilityService.prototype.getAvailableSlots;
+	const originalSendButtons = WhatsAppService.prototype.sendReplyButtonsMessage;
+	let sentButtons: Array<{ id: string; title: string }> | undefined;
+
+	SchedulingAvailabilityService.prototype.getAvailableSlots = async () => [
+		availableSlot,
+	];
+	WhatsAppService.prototype.sendReplyButtonsMessage = async (
+		_to,
+		_body,
+		buttons
+	) => {
+		sentButtons = buttons;
+		return {
+			contacts: [],
+			messages: [{ id: `wamid.outbound_offer_${Date.now()}` }],
+			messaging_product: "whatsapp",
+		};
+	};
+	t.after(() => {
+		SchedulingAvailabilityService.prototype.getAvailableSlots =
+			originalAvailability;
+		WhatsAppService.prototype.sendReplyButtonsMessage = originalSendButtons;
+	});
+
+	t.mock.method(
+		ai.models,
+		"generateContent",
+		async () =>
+			({
+				text: JSON.stringify({
+			businessAction: "offer_appointment",
+					evidenceUsed: [],
+					leadUpdate: { status: "qualified" },
+					nextAction: "offer_meeting",
+					reply: "Vou consultar os horários.",
+				}),
+			}) as GenerateContentResponse
+	);
+
+	const payload = JSON.stringify({
+		entry: [
+			{
+				changes: [
+					{
+						field: "messages",
+						value: {
+							contacts: [{ profile: { name: lead.name }, wa_id: testPhone }],
+							messages: [
+								{
+									from: testPhone,
+									id: inboundWamid,
+									text: { body: "Quero agendar" },
+									timestamp: String(Math.floor(Date.now() / 1000)),
+									type: "text",
+								},
+							],
+							messaging_product: "whatsapp",
+							metadata: {
+								display_phone_number: "5511999999999",
+								phone_number_id: "12345",
+							},
+						},
+					},
+				],
+				id: "entry_offer_test",
+			},
+		],
+		object: "whatsapp_business_account",
+	});
+
+	try {
+		const response = await app.inject({
+			headers: {
+				"content-type": "application/json",
+				"x-hub-signature-256": computeSignature(payload),
+			},
+			method: "POST",
+			payload,
+			url: "/webhooks/whatsapp",
+		});
+		assert.equal(response.statusCode, 200);
+		await messageDebounceCoordinator.flush(conversation.id);
+
+		const [session] = await db
+			.select()
+			.from(schedulingSessions)
+			.where(eq(schedulingSessions.leadId, lead.id))
+			.limit(1);
+		assert.ok(session);
+		const [slot] = await db
+			.select()
+			.from(schedulingSlots)
+			.where(eq(schedulingSlots.schedulingSessionId, session.id))
+			.limit(1);
+		assert.ok(slot);
+		assert.deepEqual(
+			sentButtons?.map((button) => button.id),
+			[slot.id]
+		);
+	} finally {
+		await db
+			.delete(schedulingSessions)
+			.where(eq(schedulingSessions.leadId, lead.id));
+		await db
+			.delete(messages)
+			.where(eq(messages.conversationId, conversation.id));
+		await db.delete(conversations).where(eq(conversations.id, conversation.id));
 		await db.delete(leads).where(eq(leads.id, lead.id));
 	}
 });
