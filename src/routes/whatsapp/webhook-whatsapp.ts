@@ -17,6 +17,7 @@ import { SchedulingChoiceService } from "../../services/calendar/scheduling-choi
 import { SchedulingConfirmationOrchestrator } from "../../services/calendar/scheduling-confirmation-orchestrator";
 import { SchedulingConfirmationService } from "../../services/calendar/scheduling-confirmation-service";
 import { receiveCustomerMessage } from "../../services/conversations/receive-customer-message";
+import { assertWhatsAppOutboundAllowed } from "../../services/conversations/whatsapp-compliance";
 import { leadIngestionService } from "../../services/leads/lead-ingestion";
 import { formatSlotDate } from "../../utils/date-formatter";
 
@@ -28,6 +29,38 @@ const schedulingConfirmationOrchestrator =
 	new SchedulingConfirmationOrchestrator();
 
 const schedulingCancellationService = new SchedulingCancellationService();
+
+async function sendCompliantText({
+	conversationId,
+	leadId,
+	text,
+	to,
+}: {
+	conversationId: string;
+	leadId: string;
+	text: string;
+	to: string;
+}) {
+	await assertWhatsAppOutboundAllowed({ conversationId, leadId });
+	return await whatsAppService.sendTextMessage(to, text);
+}
+
+async function sendCompliantButtons({
+	body,
+	buttons,
+	conversationId,
+	leadId,
+	to,
+}: {
+	body: string;
+	buttons: Parameters<typeof whatsAppService.sendReplyButtonsMessage>[2];
+	conversationId: string;
+	leadId: string;
+	to: string;
+}) {
+	await assertWhatsAppOutboundAllowed({ conversationId, leadId });
+	return await whatsAppService.sendReplyButtonsMessage(to, body, buttons);
+}
 
 export const webhookWhatsApp: FastifyPluginCallbackZod = (app, _opts, done) => {
 	app.addContentTypeParser(
@@ -192,6 +225,12 @@ export const webhookWhatsApp: FastifyPluginCallbackZod = (app, _opts, done) => {
 					 */
 
 					if (buttonId) {
+						// An interactive reply is also an inbound customer action and
+						// therefore renews the customer-service window.
+						await db
+							.update(conversations)
+							.set({ lastCustomerMessageAt: new Date(), updatedAt: new Date() })
+							.where(eq(conversations.id, conversation.id));
 						/*
 						 * 1. Confirmação explícita
 						 */
@@ -224,10 +263,12 @@ export const webhookWhatsApp: FastifyPluginCallbackZod = (app, _opts, done) => {
 								)} com ${slot.consultantName}.`;
 
 								try {
-									const sendResponse = await whatsAppService.sendTextMessage(
-										lead.phone,
-										finalReply
-									);
+									const sendResponse = await sendCompliantText({
+										conversationId: conversation.id,
+										leadId: lead.id,
+										text: finalReply,
+										to: lead.phone,
+									});
 
 									const outboundWamid = sendResponse.messages[0]?.id;
 
@@ -297,12 +338,13 @@ export const webhookWhatsApp: FastifyPluginCallbackZod = (app, _opts, done) => {
 								}));
 
 								try {
-									const sendResponse =
-										await whatsAppService.sendReplyButtonsMessage(
-											lead.phone,
-											"Tudo bem. Tenho estes horários disponíveis:",
-											buttons
-										);
+									const sendResponse = await sendCompliantButtons({
+										body: "Tudo bem. Tenho estes horários disponíveis:",
+										buttons,
+										conversationId: conversation.id,
+										leadId: lead.id,
+										to: lead.phone,
+									});
 
 									const outboundWamid = sendResponse.messages[0]?.id;
 
@@ -341,10 +383,12 @@ export const webhookWhatsApp: FastifyPluginCallbackZod = (app, _opts, done) => {
 								"Tudo bem. Esse horário não foi confirmado. Quando quiser, podemos consultar novos horários.";
 
 							try {
-								const sendResponse = await whatsAppService.sendTextMessage(
-									lead.phone,
-									finalReply
-								);
+								const sendResponse = await sendCompliantText({
+									conversationId: conversation.id,
+									leadId: lead.id,
+									text: finalReply,
+									to: lead.phone,
+								});
 
 								const outboundWamid = sendResponse.messages[0]?.id;
 
@@ -405,12 +449,13 @@ export const webhookWhatsApp: FastifyPluginCallbackZod = (app, _opts, done) => {
 							);
 
 						try {
-							const sendResponse =
-								await whatsAppService.sendReplyButtonsMessage(
-									lead.phone,
-									confirmation.body,
-									confirmation.buttons
-								);
+							const sendResponse = await sendCompliantButtons({
+								body: confirmation.body,
+								buttons: confirmation.buttons,
+								conversationId: conversation.id,
+								leadId: lead.id,
+								to: lead.phone,
+							});
 
 							request.log.info({
 								event: "whatsapp_scheduling_confirmation_sent",
@@ -460,10 +505,12 @@ export const webhookWhatsApp: FastifyPluginCallbackZod = (app, _opts, done) => {
 						role: "user",
 						onMarianaResponse: async (marianaResult) => {
 							try {
-								const sendResponse = await whatsAppService.sendTextMessage(
-									targetPhone,
-									marianaResult.result.reply
-								);
+								const sendResponse = await sendCompliantText({
+									conversationId: conversation.id,
+									leadId: lead.id,
+									text: marianaResult.result.reply,
+									to: targetPhone,
+								});
 
 								const outboundWamid = sendResponse.messages[0]?.id;
 

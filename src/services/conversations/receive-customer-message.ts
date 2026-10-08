@@ -11,6 +11,7 @@ import {
 	generateMarianaResponse,
 } from "./generateMarianaResponse";
 import { MessageDebounceCoordinator } from "./message-debounce";
+import { isOptOutRequest } from "./whatsapp-compliance";
 
 export const messageDebounceCoordinator = new MessageDebounceCoordinator(
 	env.MESSAGE_DEBOUNCE_MS
@@ -71,7 +72,17 @@ export async function receiveCustomerMessage({
 
 	await db
 		.update(conversations)
-		.set({ updatedAt: new Date() })
+		.set({
+			updatedAt: new Date(),
+			...(role === "user"
+				? {
+						lastCustomerMessageAt: message.createdAt,
+						...(isOptOutRequest(content)
+							? { optOutAt: message.createdAt }
+							: {}),
+					}
+				: {}),
+		})
 		.where(eq(conversations.id, conversationId));
 
 	if (role === "user") {
