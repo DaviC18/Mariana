@@ -16,6 +16,7 @@ import { SchedulingCancellationService } from "../../services/calendar/schedulin
 import { SchedulingChoiceService } from "../../services/calendar/scheduling-choice-service";
 import { SchedulingConfirmationOrchestrator } from "../../services/calendar/scheduling-confirmation-orchestrator";
 import { SchedulingConfirmationService } from "../../services/calendar/scheduling-confirmation-service";
+import { buildWhatsAppSchedulingOffer } from "../../services/calendar/scheduling-offer-service";
 import { receiveCustomerMessage } from "../../services/conversations/receive-customer-message";
 import { assertWhatsAppOutboundAllowed } from "../../services/conversations/whatsapp-compliance";
 import { leadIngestionService } from "../../services/leads/lead-ingestion";
@@ -505,12 +506,21 @@ export const webhookWhatsApp: FastifyPluginCallbackZod = (app, _opts, done) => {
 						role: "user",
 						onMarianaResponse: async (marianaResult) => {
 							try {
-								const sendResponse = await sendCompliantText({
-									conversationId: conversation.id,
-									leadId: lead.id,
-									text: marianaResult.result.reply,
-									to: targetPhone,
-								});
+								const sendResponse = marianaResult.schedulingOffer
+									? await sendCompliantButtons({
+											...buildWhatsAppSchedulingOffer(
+												marianaResult.schedulingOffer.slots
+											),
+											conversationId: conversation.id,
+											leadId: lead.id,
+											to: targetPhone,
+										})
+									: await sendCompliantText({
+											conversationId: conversation.id,
+											leadId: lead.id,
+											text: marianaResult.result.reply,
+											to: targetPhone,
+										});
 
 								const outboundWamid = sendResponse.messages[0]?.id;
 

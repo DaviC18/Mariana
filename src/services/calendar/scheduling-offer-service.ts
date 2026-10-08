@@ -25,6 +25,26 @@ export interface PersistSchedulingOfferResult {
 	updatedAssistantMessage: typeof messages.$inferSelect;
 }
 
+export function buildWhatsAppSchedulingOffer(
+	slots: (typeof schedulingSlots.$inferSelect)[]
+) {
+	return {
+		body: "Tenho estes horários disponíveis. Escolha uma opção:",
+		buttons: slots.map((slot) => ({
+			id: slot.id,
+			title: new Intl.DateTimeFormat("pt-BR", {
+				day: "2-digit",
+				hour: "2-digit",
+				minute: "2-digit",
+				month: "2-digit",
+				timeZone: "America/Sao_Paulo",
+			})
+				.format(slot.startAt)
+				.replace(",", " às"),
+		})),
+	};
+}
+
 export class SchedulingOfferService {
 	private readonly db: typeof defaultDb;
 
