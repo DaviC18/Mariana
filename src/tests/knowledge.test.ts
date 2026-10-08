@@ -1,3 +1,4 @@
+/** biome-ignore-all lint/performance/useTopLevelRegex: <> */
 import assert from "node:assert/strict";
 import test from "node:test";
 
@@ -8,7 +9,6 @@ import {
 	retrieveKnowledge,
 } from "../ai/knowledge/retrieve";
 
-const ADEMICON_SOURCE_PATTERN = /Ademicon/;
 const NO_EVIDENCE_PATTERN = /Nenhuma evidência autorizada/;
 
 test("item autorizado é recuperado com categoria e fonte", () => {
@@ -20,7 +20,31 @@ test("item autorizado é recuperado com categoria e fonte", () => {
 	assert.equal(result.evidenceFound, true);
 	assert.equal(result.items[0]?.id, "qualificacao-idade-minima");
 	assert.equal(result.items[0]?.category, "qualification");
-	assert.match(result.items[0]?.source ?? "", ADEMICON_SOURCE_PATTERN);
+	assert.ok((result.items[0]?.source ?? "").length > 0);
+});
+
+test("itens institucionais da Ademicon só são recuperados quando a Ademicon for configurada", () => {
+	const withoutConfig = retrieveKnowledge({
+		items: MARIANA_KNOWLEDGE,
+		query: "A Ademicon opera no modelo CaaS?",
+	});
+	assert.equal(withoutConfig.evidenceFound, false);
+
+	const otherCompany = retrieveKnowledge({
+		businessProfile: { companyName: "Outra Empresa" },
+		items: MARIANA_KNOWLEDGE,
+		query: "A Ademicon opera no modelo CaaS?",
+	});
+	assert.equal(otherCompany.evidenceFound, false);
+
+	const withAdemicon = retrieveKnowledge({
+		businessProfile: { companyName: "Ademicon" },
+		items: MARIANA_KNOWLEDGE,
+		query: "A Ademicon opera no modelo CaaS?",
+	});
+	assert.equal(withAdemicon.evidenceFound, true);
+	assert.equal(withAdemicon.items[0]?.id, "ademicon-segmentos-e-caas");
+	assert.match(withAdemicon.items[0]?.source ?? "", /Ademicon/);
 });
 
 test("itens internos nunca são recuperados para o cliente", () => {

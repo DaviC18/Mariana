@@ -1,6 +1,6 @@
 import type { KnowledgeItem } from "./types";
 
-const SOURCE = "Ademicon - conceitos de consórcio aprovados";
+const SOURCE = "Conceitos de consórcio aprovados";
 const VERSION = "2026-09-16";
 
 export const CONSORTIUM_KNOWLEDGE: KnowledgeItem[] = [
@@ -35,7 +35,7 @@ export const CONSORTIUM_KNOWLEDGE: KnowledgeItem[] = [
 		category: "contractual",
 		clientAllowed: true,
 		content:
-			"A contemplação pode ocorrer por sorteio ou por lance. A Ademicon informa em seus canais oficiais que não comercializa cotas com data certa para contemplação ou cotas já contempladas. Não é possível prever o momento exato da contemplação.",
+			"A contemplação pode ocorrer por sorteio ou por lance. As administradoras autorizadas de consórcio não comercializam cotas com data certa para contemplação ou cotas já contempladas. Não é possível prever o momento exato da contemplação.",
 		id: "consorcio-contemplacao-sem-previsao",
 		keywords: ["contemplacao", "sorteio", "lance", "data", "prazo", "prever"],
 		source: SOURCE,
@@ -45,11 +45,12 @@ export const CONSORTIUM_KNOWLEDGE: KnowledgeItem[] = [
 		accessLevel: 2,
 		category: "general",
 		clientAllowed: true,
+		companyName: "Ademicon",
 		content:
 			"As assembleias podem utilizar critérios de sorteio definidos pelas regras do grupo. A Ademicon informa que utiliza os resultados da Loteria Federal como referência para seus sorteios.",
 		id: "consorcio-sorteio-loteria-federal",
 		keywords: ["assembleia", "sorteio", "loteria federal", "grupo"],
-		source: SOURCE,
+		source: "Ademicon - regras de assembleia aprovadas",
 		version: VERSION,
 	},
 	{

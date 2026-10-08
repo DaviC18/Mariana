@@ -1,4 +1,5 @@
 /** biome-ignore-all lint/style/useFilenamingConvention: <> */
+/** biome-ignore-all lint/correctness/noUndeclaredVariables: <> */
 /** biome-ignore-all lint/correctness/noUnusedVariables: <> */
 /** biome-ignore-all assist/source/useSortedKeys: <> */
 
@@ -9,6 +10,7 @@ import {
 	type GenerateMarianaReplyResult,
 	generateMarianaReply,
 } from "../../ai/agent";
+import type { BusinessProfile } from "../../ai/business-profile";
 import { db } from "../../db/connections";
 import { appointments, conversations, leads, messages } from "../../db/schema";
 import { executeNextAction } from "../agent/execute-next-action";
@@ -22,11 +24,16 @@ import {
 import type { LeadStatus } from "../leads/lead-status";
 import { updateLeadFromAgent } from "../leads/update-lead-from-agent";
 
-type PersistLeadTransactionValues = Partial<InferInsertModel<typeof leads>> & {
+type PersistLeadTransactionValues = Partial<
+	InferInsertModel<typeof leads> & {
+		urgency?: string | null;
+	}
+> & {
 	updatedAt: Date;
 };
 
 export interface GenerateMarianaResponseParams {
+	businessProfile?: BusinessProfile;
 	currentMessages: string[];
 	generateMarianaReplyFn?: typeof generateMarianaReply;
 	leadId: string;
@@ -156,6 +163,7 @@ function formatSchedulingOffer(slots: ConsultantAvailableSlot[]): string {
 }
 
 export async function generateMarianaResponse({
+	businessProfile,
 	leadId,
 	messageCutoff,
 	messageIds,
@@ -243,13 +251,13 @@ export async function generateMarianaResponse({
 	// 5. Contexto do lead
 	const agentLead = {
 		commercialApproach: lead.commercialApproach,
-		consortiumType: lead.consortiumType,
+		consortiumType: lead.consortiumType ?? "",
 		currentSituation: lead.currentSituation,
 		name: lead.name,
-		objective: lead.objective,
+		objective: lead.objective ?? "",
 		painPoint: lead.painPoint,
 		status: lead.status,
-		urgency: lead.urgency,
+		urgency: null,
 	};
 
 	// 6. Converte histórico
@@ -267,9 +275,10 @@ export async function generateMarianaResponse({
 
 	// 7. Chama a IA
 	const response = await generateMarianaReplyFn({
-		lead: agentLead,
-		history: agentHistory,
+		businessProfile,
 		currentMessages: agentCurrentMessages,
+		history: agentHistory,
+		lead: agentLead,
 	});
 
 	// 8. Valida regra de negócio antes de persistir qualquer mudança de status

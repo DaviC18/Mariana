@@ -13,6 +13,7 @@ export interface KnowledgeItem {
 	accessLevel?: CommercialAccessLevel;
 	category: KnowledgeCategory;
 	clientAllowed: boolean;
+	companyName?: string;
 	content: string;
 	id: string;
 	keywords: string[];
@@ -24,6 +25,7 @@ export interface KnowledgeItem {
 export interface RetrievedKnowledgeItem {
 	accessLevel: CommercialAccessLevel;
 	category: KnowledgeCategory;
+	companyName?: string;
 	content: string;
 	id: string;
 	relevance: number;

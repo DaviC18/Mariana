@@ -7,6 +7,7 @@ export const ADEMICON_KNOWLEDGE: KnowledgeItem[] = [
 	{
 		category: "general",
 		clientAllowed: true,
+		companyName: "Ademicon",
 		content: "A Ademicon é uma administradora independente de consórcios.",
 		id: "ademicon-administradora-independente",
 		keywords: ["ademicon", "administradora", "consorcio"],
@@ -16,6 +17,7 @@ export const ADEMICON_KNOWLEDGE: KnowledgeItem[] = [
 	{
 		category: "general",
 		clientAllowed: true,
+		companyName: "Ademicon",
 		content:
 			"Segundo as informações institucionais disponíveis nos canais oficiais da empresa, a Ademicon atua há 35 anos no mercado.",
 		id: "ademicon-35-anos",
@@ -26,6 +28,7 @@ export const ADEMICON_KNOWLEDGE: KnowledgeItem[] = [
 	{
 		category: "general",
 		clientAllowed: true,
+		companyName: "Ademicon",
 		content:
 			"A empresa atua nos segmentos de imóveis, veículos e serviços e também administra consórcios de outras marcas por meio do modelo Consortium as a Service (CaaS).",
 		id: "ademicon-segmentos-e-caas",
@@ -36,6 +39,7 @@ export const ADEMICON_KNOWLEDGE: KnowledgeItem[] = [
 	{
 		category: "general",
 		clientAllowed: true,
+		companyName: "Ademicon",
 		content:
 			"A Ademicon possui unidades no Brasil e também unidades no exterior.",
 		id: "ademicon-unidades",
@@ -46,6 +50,7 @@ export const ADEMICON_KNOWLEDGE: KnowledgeItem[] = [
 	{
 		category: "general",
 		clientAllowed: true,
+		companyName: "Ademicon",
 		content:
 			"A Ademicon é uma empresa autorizada e fiscalizada pelo Banco Central do Brasil.",
 		id: "ademicon-banco-central",

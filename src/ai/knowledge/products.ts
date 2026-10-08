@@ -1,6 +1,6 @@
 import type { KnowledgeItem } from "./types";
 
-const SOURCE = "Ademicon - catálogo de produtos aprovado";
+const SOURCE = "Catálogo de produtos aprovado";
 const VERSION = "2026-09-16";
 
 export const PRODUCTS_KNOWLEDGE: KnowledgeItem[] = [

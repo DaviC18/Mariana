@@ -13,7 +13,7 @@ export const MARIANA_KNOWLEDGE: KnowledgeItem[] = [
 		content: "A idade mínima para contratação é 18 anos.",
 		id: "qualificacao-idade-minima",
 		keywords: ["idade", "minima", "contratacao", "anos", "elegibilidade"],
-		source: "Ademicon - política de qualificação aprovada",
+		source: "Política de qualificação aprovada",
 		version: "2026-09-16",
 	},
 	{
@@ -30,7 +30,7 @@ export const MARIANA_KNOWLEDGE: KnowledgeItem[] = [
 			"estrategia",
 			"personalizada",
 		],
-		source: "Ademicon - política interna de atendimento",
+		source: "Política interna de atendimento",
 		version: "2026-09-16",
 	},
 ];

@@ -2,6 +2,7 @@
 
 import { eq } from "drizzle-orm";
 
+import type { BusinessProfile } from "../../ai/business-profile";
 import { db } from "../../db/connections";
 import { conversations, messages } from "../../db/schema";
 import { env } from "../../env";
@@ -16,12 +17,14 @@ export const messageDebounceCoordinator = new MessageDebounceCoordinator(
 );
 
 export async function receiveCustomerMessage({
+	businessProfile,
 	content,
 	conversationId,
 	externalId,
 	role,
 	onMarianaResponse,
 }: {
+	businessProfile?: BusinessProfile;
 	content: string;
 	conversationId: string;
 	externalId?: string;
@@ -88,6 +91,7 @@ export async function receiveCustomerMessage({
 					debouncedMessages[0]?.receivedAt ?? message.createdAt
 				);
 				const marianaResult = await generateMarianaResponse({
+					businessProfile,
 					currentMessages: debouncedMessages.map(
 						(debouncedMessage) => debouncedMessage.content
 					),

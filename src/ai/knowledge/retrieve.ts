@@ -1,3 +1,4 @@
+import type { BusinessProfile } from "../business-profile";
 import type {
 	KnowledgeCategory,
 	KnowledgeItem,
@@ -48,6 +49,7 @@ const toRetrievedItem = (
 ): RetrievedKnowledgeItem => ({
 	accessLevel: item.accessLevel ?? 1,
 	category: item.category,
+	companyName: item.companyName,
 	content: item.content,
 	id: item.id,
 	relevance,
@@ -57,18 +59,30 @@ const toRetrievedItem = (
 });
 
 export function retrieveKnowledge({
+	businessProfile,
 	category,
 	items,
 	query,
 }: {
+	businessProfile?: BusinessProfile;
 	category?: KnowledgeCategory;
 	items: KnowledgeItem[];
 	query: string;
 }): KnowledgeRetrievalResult {
+	const configuredCompany = businessProfile?.companyName?.trim().toLowerCase();
 	const queryTokens = tokenize(query);
 	const candidates = items
 		.filter((item) => item.clientAllowed)
 		.filter((item) => category === undefined || item.category === category)
+		.filter((item) => {
+			if (!item.companyName) {
+				return true;
+			}
+			if (!configuredCompany) {
+				return false;
+			}
+			return item.companyName.trim().toLowerCase() === configuredCompany;
+		})
 		.map((item) => {
 			const searchableTokens = new Set(
 				tokenize(`${item.content} ${item.keywords.join(" ")}`)

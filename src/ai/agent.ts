@@ -5,7 +5,14 @@
 
 import type { GenerateContentResponse } from "@google/genai";
 import { z } from "zod";
-import { assertSafeMarianaReply } from "../services/conversations/mariana-safety";
+import {
+	assertSafeMarianaReply,
+	sanitizeCommercialIdentity,
+} from "../services/conversations/mariana-safety";
+import {
+	type BusinessProfile,
+	resolveBusinessProfile,
+} from "./business-profile";
 import { ai } from "./client";
 import { MARIANA_KNOWLEDGE } from "./knowledge";
 import {
@@ -18,7 +25,7 @@ import {
 	retrieveKnowledge,
 } from "./knowledge/retrieve";
 import { validateMarianaEvidence } from "./knowledge/validate-response";
-import { MARIANA_SYSTEM_PROMPT } from "./prompt";
+import { buildMarianaSystemPrompt } from "./prompt";
 import {
 	type MarianaResponse,
 	marianaResponseSchema,
@@ -46,10 +53,11 @@ export interface MarianaLead {
 }
 
 export interface GenerateMarianaReplyParams {
-	lead: MarianaLead;
-	history: MarianaMessage[];
-	currentMessages: MarianaMessage[];
 	additionalContext?: string;
+	businessProfile?: BusinessProfile;
+	currentMessages: MarianaMessage[];
+	history: MarianaMessage[];
+	lead: MarianaLead;
 }
 
 export interface GenerateMarianaReplyResult {
@@ -62,11 +70,13 @@ export interface GenerateMarianaReplyResult {
 }
 
 export async function generateMarianaReply({
-	lead,
-	history,
+	businessProfile,
 	currentMessages,
+	history,
+	lead,
 }: GenerateMarianaReplyParams): Promise<GenerateMarianaReplyResult> {
 	const startedAt = Date.now();
+	const profile = resolveBusinessProfile(businessProfile);
 	const allMessages = [...history, ...currentMessages];
 
 	const contents = allMessages
@@ -93,6 +103,7 @@ export async function generateMarianaReply({
 		.join("\n");
 
 	const knowledgeContext = retrieveKnowledge({
+		businessProfile: profile,
 		items: MARIANA_KNOWLEDGE,
 		query: currentBlockQuery,
 	});
@@ -122,8 +133,10 @@ export async function generateMarianaReply({
 	const accessInstruction =
 		commercialAccess.level === 2 ? `\n\n${LEVEL_TWO_INSTRUCTION}` : "";
 
+	const baseSystemPrompt = buildMarianaSystemPrompt(profile);
+
 	const contextualSystemPrompt = `
-${MARIANA_SYSTEM_PROMPT}
+${baseSystemPrompt}
 
 	# BASE DE CONHECIMENTO AUTORIZADA
 
@@ -170,13 +183,20 @@ ${accessInstruction}
 	}
 
 	const parsedResult = marianaResponseSchema.parse(parsed);
+	const sanitizedReply = sanitizeCommercialIdentity(
+		parsedResult.reply,
+		profile
+	);
 	const result = validateMarianaEvidence({
 		commercialAccess,
 		query: latestUserMessage,
-		response: parsedResult,
+		response: {
+			...parsedResult,
+			reply: sanitizedReply,
+		},
 		retrieval: knowledgeContext,
 	});
-	assertSafeMarianaReply(result.reply);
+	assertSafeMarianaReply(result.reply, profile);
 
 	return {
 		metadata: {
