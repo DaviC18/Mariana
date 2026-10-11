@@ -27,9 +27,9 @@ import {
 import { env } from "../../env";
 import { WhatsAppService } from "../../integrations/whatsapp/whatsapp-service";
 import { webhookWhatsApp } from "../../routes/whatsapp/webhook-whatsapp";
+import { SchedulingAvailabilityService } from "../../services/calendar/scheduling-availability";
 import { SchedulingChoiceService } from "../../services/calendar/scheduling-choice-service";
 import { SchedulingConfirmationOrchestrator } from "../../services/calendar/scheduling-confirmation-orchestrator";
-import { SchedulingAvailabilityService } from "../../services/calendar/scheduling-availability";
 import { messageDebounceCoordinator } from "../../services/conversations/receive-customer-message";
 
 function buildApp() {
@@ -1030,7 +1030,7 @@ test("POST /webhooks/whatsapp - oferta de agenda envia os slots persistidos como
 		async () =>
 			({
 				text: JSON.stringify({
-			businessAction: "offer_appointment",
+					businessAction: "offer_appointment",
 					evidenceUsed: [],
 					leadUpdate: { status: "qualified" },
 					nextAction: "offer_meeting",
