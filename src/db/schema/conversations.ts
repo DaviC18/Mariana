@@ -11,11 +11,15 @@ export const conversations = pgTable(
 	"conversations",
 	{
 		id: uuid().primaryKey().defaultRandom(),
+		// Operational WhatsApp compliance state. This is intentionally separate
+		// from the agent's reasoning and qualification state.
+		lastCustomerMessageAt: timestamp({ withTimezone: true }),
 		leadId: uuid()
 			.notNull()
 			.references(() => leads.id, {
 				onDelete: "cascade",
 			}),
+		optOutAt: timestamp({ withTimezone: true }),
 		startedAt: timestamp({ withTimezone: true }).notNull().defaultNow(),
 		status: conversationStatus().notNull().default("active"),
 		updatedAt: timestamp({ withTimezone: true }).notNull().defaultNow(),

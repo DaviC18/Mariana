@@ -31,7 +31,5 @@
       }
     }
   },
-  "extends": [
-    "ultracite/biome/core"
-  ]
+  "extends": ["ultracite/biome/core"]
 }

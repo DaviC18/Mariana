@@ -12,9 +12,12 @@ import { consultants } from "./consultants";
 import { leads } from "./leads";
 
 export const appointmentStatus = pgEnum("appointment_status", [
-	"scheduled",
+	"pending_confirmation",
+	"confirmed",
+	"expired",
 	"cancelled",
 	"completed",
+	"scheduled",
 ]);
 
 export const appointments = pgTable(
@@ -34,7 +37,7 @@ export const appointments = pgTable(
 		externalEventId: text().notNull().unique(),
 		startAt: timestamp({ withTimezone: true }).notNull(),
 		endAt: timestamp({ withTimezone: true }).notNull(),
-		status: appointmentStatus().notNull().default("scheduled"),
+		status: appointmentStatus().notNull().default("pending_confirmation"),
 		createdAt: timestamp({ withTimezone: true }).notNull().defaultNow(),
 	},
 	(table) => ({

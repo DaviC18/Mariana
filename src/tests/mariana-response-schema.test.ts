@@ -1,0 +1,92 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { z } from "zod";
+
+import { marianaResponseSchema } from "../ai/schemas/mariana-response-schema";
+
+test("CASO 1 — resposta válida", () => {
+	const payload = {
+		leadUpdate: {
+			consortiumType: "Imóvel",
+			objective: "Comprar um imóvel",
+			status: "qualifying",
+		},
+		nextAction: "continue_qualification",
+		reply: "Posso te orientar sobre consórcio de imóvel.",
+	};
+
+	assert.doesNotThrow(() => marianaResponseSchema.parse(payload));
+});
+
+test("CASO 2 — status inválido", () => {
+	const payload = {
+		leadUpdate: {
+			consortiumType: "Imóvel",
+			objective: "Comprar um imóvel",
+			status: "banana",
+		},
+		nextAction: "continue_qualification",
+		reply: "Mensagem válida",
+	};
+
+	assert.throws(() => marianaResponseSchema.parse(payload));
+});
+
+test("CASO 3 — nextAction inválida", () => {
+	const payload = {
+		leadUpdate: {
+			consortiumType: null,
+			objective: null,
+			status: "new",
+		},
+		nextAction: "do_everything",
+		reply: "Mensagem válida",
+	};
+
+	assert.throws(() => marianaResponseSchema.parse(payload));
+});
+
+test("CASO 4 — reply vazia", () => {
+	const payload = {
+		leadUpdate: {
+			consortiumType: null,
+			objective: null,
+			status: "new",
+		},
+		nextAction: "continue_qualification",
+		reply: "",
+	};
+
+	assert.throws(() => marianaResponseSchema.parse(payload));
+});
+
+test("interestedInConsultant aceita true, false ou ausência", () => {
+	for (const interestedInConsultant of [true, false, undefined]) {
+		const payload = {
+			leadUpdate: {
+				interestedInConsultant,
+				status: "qualifying",
+			},
+			nextAction: "continue_qualification",
+			reply: "Vou entender melhor o seu objetivo.",
+		};
+
+		assert.doesNotThrow(() => marianaResponseSchema.parse(payload));
+	}
+});
+
+test("schema da resposta é compatível com JSON Schema do Gemini", () => {
+	assert.doesNotThrow(() => z.toJSONSchema(marianaResponseSchema));
+});
+
+test("birthDate é recebido como data ISO na resposta da IA", () => {
+	const parsed = marianaResponseSchema.parse({
+		leadUpdate: {
+			birthDate: "2008-09-16",
+			status: "qualifying",
+		},
+		reply: "Vou registrar sua data de nascimento.",
+	});
+
+	assert.equal(parsed.leadUpdate.birthDate, "2008-09-16");
+});

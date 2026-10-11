@@ -8,3 +8,7 @@ import { env } from "../env";
 const sql = postgres(env.DATABASE_URL);
 
 export const db = drizzle({ client: sql, relations });
+
+export async function closeDatabase(): Promise<void> {
+	await sql.end({ timeout: 5 });
+}

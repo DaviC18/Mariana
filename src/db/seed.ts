@@ -1,155 +1,121 @@
-import { db } from "./connections";
-import {
-	appointments,
-	consultants,
-	conversations,
-	leads,
-	messages,
-} from "./schema";
+import { randomUUID } from "node:crypto";
+import { eq } from "drizzle-orm";
+
+import { closeDatabase, db } from "./connections";
+import { autonomousTasks, conversations, leads, messages } from "./schema";
 
 async function main() {
-	console.log("🌱 Starting database seed...");
+	let testLeadId: string | undefined;
 
-	// 1. Create consultants
-	const [consultant1, consultant2, consultant3] = await db
-		.insert(consultants)
-		.values([
-			{
-				calendarId: "calendar-joao",
-				email: "joao@consorcio.test",
-				name: "João Silva",
-			},
-			{
-				calendarId: "calendar-maria",
-				email: "maria@consorcio.test",
-				name: "Maria Souza",
-			},
-			{
-				calendarId: "calendar-carlos",
-				email: "carlos@consorcio.test",
-				name: "Carlos Oliveira",
-			},
-		])
-		.returning();
+	try {
+		console.log("🧪 Testing autonomous task persistence...");
 
-	console.log("✅ Consultants created");
+		const runId = randomUUID();
 
-	// 2. Create leads
-	const [lead1, lead2] = await db
-		.insert(leads)
-		.values([
-			{
-				consortiumType: "Imóvel",
-				name: "Davi Teste",
-				objective: "Comprar um imóvel",
-				phone: "5521999999999",
+		// 1. Criar um lead isolado para o teste.
+		const [lead] = await db
+			.insert(leads)
+			.values({
+				name: "Teste de tarefa autônoma",
+				phone: `autonomous-test-${runId}`,
 				status: "new",
-			},
-			{
-				consortiumType: "Veículo",
-				name: "Ana Teste",
-				objective: "Comprar um carro",
-				phone: "5521988888888",
-				status: "qualified",
-			},
-		])
-		.returning();
+			})
+			.returning({ id: leads.id });
 
-	console.log("✅ Leads created");
+		if (!lead) {
+			throw new Error("Não foi possível criar o lead de teste");
+		}
 
-	// 3. Create conversations
-	const [conversation1, conversation2] = await db
-		.insert(conversations)
-		.values([
-			{
-				leadId: lead1.id,
+		testLeadId = lead.id;
+
+		// 2. Criar a conversa.
+		const [conversation] = await db
+			.insert(conversations)
+			.values({
+				leadId: lead.id,
 				status: "active",
-			},
-			{
-				leadId: lead2.id,
-				status: "closed",
-			},
-		])
-		.returning();
+			})
+			.returning({ id: conversations.id });
 
-	console.log("✅ Conversations created");
+		if (!conversation) {
+			throw new Error("Não foi possível criar a conversa de teste");
+		}
 
-	// 4. Create messages
-	await db.insert(messages).values([
-		{
-			content: "Olá, gostaria de saber como funciona o consórcio.",
-			conversationId: conversation1.id,
-			externalId: "test-message-001",
-			role: "user",
-		},
-		{
-			content:
-				"Olá! Posso explicar como funciona e também verificar uma reunião com um consultor.",
-			conversationId: conversation1.id,
-			externalId: "test-message-002",
-			role: "assistant",
-		},
-		{
-			content: "Quero falar com um consultor.",
-			conversationId: conversation2.id,
-			externalId: "test-message-003",
-			role: "user",
-		},
-	]);
+		// 3. Criar a mensagem que inicia o fluxo.
+		const [triggerMessage] = await db
+			.insert(messages)
+			.values({
+				content: "Olá, quero falar com um consultor.",
+				conversationId: conversation.id,
+				externalId: `autonomous-test-${runId}`,
+				role: "user",
+			})
+			.returning({
+				conversationId: messages.conversationId,
+				id: messages.id,
+			});
 
-	console.log("✅ Messages created");
+		if (!triggerMessage) {
+			throw new Error("Não foi possível criar a mensagem de teste");
+		}
 
-	// 5. Create appointments
-	const now = new Date();
+		// 4. Registrar a tarefa autônoma.
+		const [createdTask] = await db
+			.insert(autonomousTasks)
+			.values({
+				conversationId: triggerMessage.conversationId,
+				idempotencyKey: `autonomous-test:${runId}`,
+				payload: {
+					purpose: "verify_autonomous_task_persistence",
+					source: "isolated-test",
+				},
+				taskType: "process_inbound",
+				triggerMessageId: triggerMessage.id,
+			})
+			.returning();
 
-	const start1 = new Date(now);
-	start1.setDate(start1.getDate() + 1);
-	start1.setHours(14, 0, 0, 0);
+		if (!createdTask) {
+			throw new Error("A tarefa autônoma não foi criada");
+		}
 
-	const end1 = new Date(start1);
-	end1.setMinutes(end1.getMinutes() + 30);
+		// 5. Consultar novamente o banco.
+		const [persistedTask] = await db
+			.select()
+			.from(autonomousTasks)
+			.where(eq(autonomousTasks.id, createdTask.id))
+			.limit(1);
 
-	const start2 = new Date(now);
-	start2.setDate(start2.getDate() + 2);
-	start2.setHours(10, 0, 0, 0);
+		if (
+			persistedTask?.status !== "pending" ||
+			persistedTask.triggerMessageId !== triggerMessage.id ||
+			persistedTask.conversationId !== conversation.id
+		) {
+			throw new Error(
+				"A tarefa persistida não corresponde aos dados esperados"
+			);
+		}
 
-	const end2 = new Date(start2);
-	end2.setMinutes(end2.getMinutes() + 30);
-
-	await db.insert(appointments).values([
-		{
-			consultantId: consultant1.id,
-			endAt: end1,
-			externalEventId: "test-event-001",
-			leadId: lead1.id,
-			startAt: start1,
-			status: "scheduled",
-		},
-		{
-			consultantId: consultant2.id,
-			endAt: end2,
-			externalEventId: "test-event-002",
-			leadId: lead2.id,
-			startAt: start2,
-			status: "scheduled",
-		},
-		{
-			consultantId: consultant3.id,
-			endAt: end2,
-			externalEventId: "test-event-003",
-			leadId: lead2.id,
-			startAt: start2,
-			status: "scheduled",
-		},
-	]);
-
-	console.log("✅ Appointments created");
-
-	console.log("🎉 Database seed completed successfully!");
+		console.log("✅ Autonomous task persistence verified", {
+			id: persistedTask.id,
+			status: persistedTask.status,
+			taskType: persistedTask.taskType,
+			workflowId: persistedTask.workflowId,
+		});
+	} finally {
+		// A exclusão do lead remove os registros dependentes
+		// pelas relações com ON DELETE CASCADE.
+		if (testLeadId) {
+			await db.delete(leads).where(eq(leads.id, testLeadId));
+		}
+	}
 }
 
-main().catch((error) => {
-	console.error("❌ Database seed failed:");
-	console.error(error);
-	process.exit(1);
-});
+main()
+	.catch((error) => {
+		console.error("❌ Autonomous task test failed:");
+		console.error(error);
+		process.exitCode = 1;
+	})
+	.finally(async () => {
+		await closeDatabase();
+	});
