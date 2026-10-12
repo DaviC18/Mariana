@@ -508,9 +508,13 @@ export const webhookWhatsApp: FastifyPluginCallbackZod = (app, _opts, done) => {
 							try {
 								const sendResponse = marianaResult.schedulingOffer
 									? await sendCompliantButtons({
-											...buildWhatsAppSchedulingOffer(
-												marianaResult.schedulingOffer.slots
-											),
+											...(marianaResult.schedulingOffer.slots.length === 1
+												? schedulingConfirmationService.buildSingleSlotConfirmationMessage(
+														marianaResult.schedulingOffer.slots[0]
+													)
+												: buildWhatsAppSchedulingOffer(
+														marianaResult.schedulingOffer.slots
+													)),
 											conversationId: conversation.id,
 											leadId: lead.id,
 											to: targetPhone,

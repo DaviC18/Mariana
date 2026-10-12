@@ -458,3 +458,29 @@ test("gera exatamente os dois botões de confirmação", () => {
 		},
 	]);
 });
+
+test("monta confirmação direta quando há somente um horário disponível", () => {
+	const slotId = "550e8400-e29b-41d4-a716-446655440014";
+
+	const result =
+		schedulingConfirmationService.buildSingleSlotConfirmationMessage({
+			consultantName: "Ana Costa",
+			id: slotId,
+			startAt: new Date("2026-09-29T10:00:00-03:00"),
+		});
+
+	assert.equal(
+		result.body,
+		"Tenho um horário disponível: Terça-feira, 29 de setembro às 10:00 com Ana Costa. Posso confirmar?"
+	);
+	assert.deepEqual(result.buttons, [
+		{
+			id: `confirm:${slotId}`,
+			title: "Confirmar",
+		},
+		{
+			id: `cancel:${slotId}`,
+			title: "Não",
+		},
+	]);
+});

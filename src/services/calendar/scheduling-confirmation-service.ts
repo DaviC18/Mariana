@@ -107,17 +107,34 @@ export class SchedulingConfirmationService {
 
 		return {
 			body: `Você escolheu ${formattedDate} com ${slot.consultantName}. Posso confirmar?`,
-			buttons: [
-				{
-					id: `confirm:${slot.id}`,
-					title: "Confirmar",
-				},
-				{
-					id: `cancel:${slot.id}`,
-					title: "Não",
-				},
-			],
+			buttons: this.buildConfirmationButtons(slot.id),
 		};
+	}
+
+	buildSingleSlotConfirmationMessage(slot: {
+		id: string;
+		startAt: Date;
+		consultantName: string;
+	}): SchedulingConfirmationMessage {
+		const formattedDate = formatSlotDate(slot.startAt);
+
+		return {
+			body: `Tenho um horário disponível: ${formattedDate} com ${slot.consultantName}. Posso confirmar?`,
+			buttons: this.buildConfirmationButtons(slot.id),
+		};
+	}
+
+	private buildConfirmationButtons(slotId: string) {
+		return [
+			{
+				id: `confirm:${slotId}`,
+				title: "Confirmar",
+			},
+			{
+				id: `cancel:${slotId}`,
+				title: "Não",
+			},
+		];
 	}
 
 	async resolveConfirmation(
