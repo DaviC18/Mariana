@@ -409,6 +409,151 @@ test("POST /webhooks/whatsapp - fluxo completo: lead, conversation, inbound, deb
 	assert.equal(allConversationsForLead.length, 1);
 });
 
+test("POST /webhooks/whatsapp - button_reply duplicado é ignorado após a primeira entrega", async (t) => {
+	const app = buildApp();
+
+	t.after(() => app.close());
+
+	const testPhone = `55119${Math.floor(
+		10_000_000 + Math.random() * 90_000_000
+	)}`;
+
+	const buttonWamid = `wamid.button_duplicate_${Date.now()}_${Math.random()
+		.toString(36)
+		.slice(7)}`;
+
+	const buttonId = crypto.randomUUID();
+	const sessionId = crypto.randomUUID();
+
+	let choiceCalls = 0;
+
+	const originalResolveChoice = SchedulingChoiceService.prototype.resolveChoice;
+	const originalSendReplyButtonsMessage =
+		WhatsAppService.prototype.sendReplyButtonsMessage;
+
+	SchedulingChoiceService.prototype.resolveChoice = async (_input) => {
+		choiceCalls += 1;
+		return {
+			ok: true,
+			session: { id: sessionId },
+			slot: {
+				consultantName: "João Silva",
+				id: buttonId,
+				startAt: new Date("2026-09-29T10:00:00-03:00"),
+			},
+		} as Awaited<ReturnType<SchedulingChoiceService["resolveChoice"]>>;
+	};
+
+	WhatsAppService.prototype.sendReplyButtonsMessage = async () => ({
+		contacts: [],
+		messages: [{ id: `wamid.confirmation_${Date.now()}` }],
+		messaging_product: "whatsapp",
+	});
+
+	t.after(() => {
+		SchedulingChoiceService.prototype.resolveChoice = originalResolveChoice;
+		WhatsAppService.prototype.sendReplyButtonsMessage =
+			originalSendReplyButtonsMessage;
+	});
+
+	const [lead] = await db
+		.insert(leads)
+		.values({
+			consortiumType: "geral",
+			name: "Cliente Teste Button Duplicado",
+			objective: "geral",
+			phone: testPhone,
+		})
+		.returning();
+
+	assert.ok(lead);
+
+	const [conversation] = await db
+		.insert(conversations)
+		.values({
+			leadId: lead.id,
+		})
+		.returning();
+
+	assert.ok(conversation);
+
+	const payload = JSON.stringify({
+		entry: [
+			{
+				changes: [
+					{
+						field: "messages",
+						value: {
+							contacts: [
+								{
+									profile: { name: "Cliente Teste Button Duplicado" },
+									wa_id: testPhone,
+								},
+							],
+							messages: [
+								{
+									from: testPhone,
+									id: buttonWamid,
+									interactive: {
+										button_reply: {
+											id: buttonId,
+											title: "10:00 - João Silva",
+										},
+										type: "button_reply",
+									},
+									timestamp: String(Math.floor(Date.now() / 1000)),
+									type: "interactive",
+								},
+							],
+							messaging_product: "whatsapp",
+							metadata: {
+								display_phone_number: "5511999999999",
+								phone_number_id: "12345",
+							},
+						},
+					},
+				],
+				id: "entry_button_duplicate_test",
+			},
+		],
+		object: "whatsapp_business_account",
+	});
+
+	try {
+		const firstResponse = await app.inject({
+			headers: {
+				"content-type": "application/json",
+				"x-hub-signature-256": computeSignature(payload),
+			},
+			method: "POST",
+			payload,
+			url: "/webhooks/whatsapp",
+		});
+
+		assert.equal(firstResponse.statusCode, 200);
+
+		const duplicateResponse = await app.inject({
+			headers: {
+				"content-type": "application/json",
+				"x-hub-signature-256": computeSignature(payload),
+			},
+			method: "POST",
+			payload,
+			url: "/webhooks/whatsapp",
+		});
+
+		assert.equal(duplicateResponse.statusCode, 200);
+		assert.equal(
+			choiceCalls,
+			1,
+			"o mesmo buttonReply não deve ser processado duas vezes"
+		);
+	} finally {
+		await db.delete(conversations).where(eq(conversations.id, conversation.id));
+		await db.delete(leads).where(eq(leads.id, lead.id));
+	}
+});
+
 test("POST /webhooks/whatsapp - button_reply válido envia confirmação com Confirmar e Não sem passar pelo fluxo conversacional", async (t) => {
 	const app = buildApp();
 

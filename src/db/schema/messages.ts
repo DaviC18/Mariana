@@ -1,10 +1,12 @@
 /** biome-ignore-all assist/source/useSortedKeys: <> */
+import { sql } from "drizzle-orm";
 import {
 	index,
 	pgEnum,
 	pgTable,
 	text,
 	timestamp,
+	uniqueIndex,
 	uuid,
 } from "drizzle-orm/pg-core";
 
@@ -36,5 +38,8 @@ export const messages = pgTable(
 			table.createdAt
 		),
 		externalIdIdx: index("messages_external_id_idx").on(table.externalId),
+		externalIdUniqueIdx: uniqueIndex("messages_external_id_unique_idx")
+			.on(table.externalId)
+			.where(sql`"externalId" IS NOT NULL`),
 	})
 );

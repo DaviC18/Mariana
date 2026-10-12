@@ -45,30 +45,60 @@ export async function receiveCustomerMessage({
 		throw new Error("Conversation not found");
 	}
 
-	if (externalId) {
-		const [existingMessage] = await db
-			.select()
-			.from(messages)
-			.where(eq(messages.externalId, externalId))
-			.limit(1);
+	let message:
+		| {
+				id: string;
+				conversationId: string;
+				content: string;
+				createdAt: Date;
+				externalId?: string | null;
+				role: "user" | "assistant" | "system";
+		  }
+		| undefined;
 
-		if (existingMessage) {
-			return {
-				duplicate: true,
-				message: existingMessage,
-			};
+	if (externalId) {
+		const [insertedMessage] = await db
+			.insert(messages)
+			.values({
+				content,
+				conversationId,
+				externalId,
+				role,
+			})
+			.onConflictDoNothing()
+			.returning();
+
+		if (insertedMessage) {
+			message = insertedMessage;
+		} else {
+			const [existingMessage] = await db
+				.select()
+				.from(messages)
+				.where(eq(messages.externalId, externalId))
+				.limit(1);
+
+			if (existingMessage) {
+				return {
+					duplicate: true,
+					message: existingMessage,
+				};
+			}
 		}
 	}
 
-	const [message] = await db
-		.insert(messages)
-		.values({
-			content,
-			conversationId,
-			externalId,
-			role,
-		})
-		.returning();
+	if (!message) {
+		const [createdMessage] = await db
+			.insert(messages)
+			.values({
+				content,
+				conversationId,
+				externalId,
+				role,
+			})
+			.returning();
+
+		message = createdMessage;
+	}
 
 	await db
 		.update(conversations)

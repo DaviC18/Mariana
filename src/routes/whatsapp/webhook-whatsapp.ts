@@ -8,7 +8,11 @@ import { and, eq } from "drizzle-orm";
 import type { FastifyPluginCallbackZod } from "fastify-type-provider-zod";
 import z from "zod";
 import { db } from "../../db/connections";
-import { conversations, messages } from "../../db/schema";
+import {
+	conversations,
+	messages,
+	whatsappWebhookEvents,
+} from "../../db/schema";
 import { env } from "../../env";
 import { whatsAppService } from "../../integrations/whatsapp/whatsapp-service";
 import type { WhatsAppWebhookPayload } from "../../integrations/whatsapp/whatsapp-types";
@@ -61,6 +65,96 @@ async function sendCompliantButtons({
 }) {
 	await assertWhatsAppOutboundAllowed({ conversationId, leadId });
 	return await whatsAppService.sendReplyButtonsMessage(to, body, buttons);
+}
+
+async function claimWhatsAppWebhookEvent({
+	externalId,
+	phone,
+	eventType,
+	payload,
+}: {
+	externalId: string;
+	phone?: string;
+	eventType: "button_reply" | "text";
+	payload: Record<string, unknown>;
+}) {
+	const [insertedEvent] = await db
+		.insert(whatsappWebhookEvents)
+		.values({
+			eventType,
+			externalId,
+			payload,
+			phone,
+			status: "processing",
+		})
+		.onConflictDoNothing()
+		.returning();
+
+	if (insertedEvent) {
+		return {
+			duplicate: false,
+			event: insertedEvent,
+		};
+	}
+
+	const [existingEvent] = await db
+		.select()
+		.from(whatsappWebhookEvents)
+		.where(eq(whatsappWebhookEvents.externalId, externalId))
+		.limit(1);
+
+	if (!existingEvent) {
+		return {
+			duplicate: false,
+		};
+	}
+
+	if (
+		existingEvent.status === "processing" ||
+		existingEvent.status === "processed"
+	) {
+		return {
+			duplicate: true,
+			event: existingEvent,
+		};
+	}
+
+	const [reclaimedEvent] = await db
+		.update(whatsappWebhookEvents)
+		.set({
+			payload,
+			phone,
+			status: "processing",
+			updatedAt: new Date(),
+		})
+		.where(eq(whatsappWebhookEvents.id, existingEvent.id))
+		.returning();
+
+	return {
+		duplicate: false,
+		event: reclaimedEvent,
+	};
+}
+
+async function markWhatsAppWebhookEventProcessed(id: string) {
+	await db
+		.update(whatsappWebhookEvents)
+		.set({
+			status: "processed",
+			updatedAt: new Date(),
+		})
+		.where(eq(whatsappWebhookEvents.id, id));
+}
+
+async function markWhatsAppWebhookEventFailed(id: string, reason: string) {
+	await db
+		.update(whatsappWebhookEvents)
+		.set({
+			payload: { error: reason },
+			status: "failed",
+			updatedAt: new Date(),
+		})
+		.where(eq(whatsappWebhookEvents.id, id));
 }
 
 export const webhookWhatsApp: FastifyPluginCallbackZod = (app, _opts, done) => {
@@ -174,6 +268,22 @@ export const webhookWhatsApp: FastifyPluginCallbackZod = (app, _opts, done) => {
 					const externalId = message.id;
 					const content = message.text?.body;
 					const buttonId = message.interactive?.button_reply?.id;
+					const eventType = isButtonReply ? "button_reply" : "text";
+					const eventReceipt = await claimWhatsAppWebhookEvent({
+						eventType,
+						externalId,
+						payload: {
+							buttonId,
+							content,
+							message,
+							phone,
+						},
+						phone,
+					});
+
+					if (eventReceipt.duplicate) {
+						continue;
+					}
 
 					const contact = value.contacts?.find((c) => c.wa_id === phone);
 
@@ -207,6 +317,16 @@ export const webhookWhatsApp: FastifyPluginCallbackZod = (app, _opts, done) => {
 							.returning();
 					}
 
+					if (eventReceipt.event?.id) {
+						await db
+							.update(whatsappWebhookEvents)
+							.set({
+								conversationId: conversation.id,
+								updatedAt: new Date(),
+							})
+							.where(eq(whatsappWebhookEvents.id, eventReceipt.event.id));
+					}
+
 					/*
 					 * Fluxo determinístico de seleção,
 					 * confirmação e cancelamento
@@ -226,42 +346,185 @@ export const webhookWhatsApp: FastifyPluginCallbackZod = (app, _opts, done) => {
 					 */
 
 					if (buttonId) {
-						// An interactive reply is also an inbound customer action and
-						// therefore renews the customer-service window.
-						await db
-							.update(conversations)
-							.set({ lastCustomerMessageAt: new Date(), updatedAt: new Date() })
-							.where(eq(conversations.id, conversation.id));
-						/*
-						 * 1. Confirmação explícita
-						 */
-						if (buttonId.startsWith("confirm:")) {
-							const confirmationResult =
-								await schedulingConfirmationOrchestrator.execute({
-									buttonId,
-									conversationId: conversation.id,
-									leadId: lead.id,
-								});
+						try {
+							// An interactive reply is also an inbound customer action and
+							// therefore renews the customer-service window.
+							await db
+								.update(conversations)
+								.set({
+									lastCustomerMessageAt: new Date(),
+									updatedAt: new Date(),
+								})
+								.where(eq(conversations.id, conversation.id));
+							/*
+							 * 1. Confirmação explícita
+							 */
+							if (buttonId.startsWith("confirm:")) {
+								const confirmationResult =
+									await schedulingConfirmationOrchestrator.execute({
+										buttonId,
+										conversationId: conversation.id,
+										leadId: lead.id,
+									});
 
-							if (!confirmationResult.ok) {
-								request.log.warn({
-									event: "whatsapp_scheduling_confirmation_rejected",
-									reason: confirmationResult.reason,
-									buttonId,
-									leadId: lead.id,
-									conversationId: conversation.id,
-									externalId,
-								});
+								if (!confirmationResult.ok) {
+									request.log.warn({
+										event: "whatsapp_scheduling_confirmation_rejected",
+										reason: confirmationResult.reason,
+										buttonId,
+										leadId: lead.id,
+										conversationId: conversation.id,
+										externalId,
+									});
+
+									if (eventReceipt.event?.id) {
+										await markWhatsAppWebhookEventProcessed(
+											eventReceipt.event.id
+										);
+									}
+
+									continue;
+								}
+
+								if (confirmationResult.action === "confirm") {
+									const { appointment, slot } = confirmationResult;
+
+									const finalReply = `Agendamento confirmado para ${formatSlotDate(
+										slot.startAt
+									)} com ${slot.consultantName}.`;
+
+									try {
+										const sendResponse = await sendCompliantText({
+											conversationId: conversation.id,
+											leadId: lead.id,
+											text: finalReply,
+											to: lead.phone,
+										});
+
+										const outboundWamid = sendResponse.messages[0]?.id;
+
+										request.log.info({
+											event: "whatsapp_scheduling_confirmed",
+											appointmentId: appointment.appointmentId,
+											conversationId: conversation.id,
+											leadId: lead.id,
+											externalId,
+											outboundWamid,
+										});
+									} catch (err) {
+										request.log.error(
+											{
+												err,
+												event: "whatsapp_scheduling_confirmation_send_failed",
+												appointmentId: appointment.appointmentId,
+												conversationId: conversation.id,
+												leadId: lead.id,
+												externalId,
+											},
+											"Failed to send scheduling confirmation to WhatsApp"
+										);
+									}
+								}
+
+								if (eventReceipt.event?.id) {
+									await markWhatsAppWebhookEventProcessed(
+										eventReceipt.event.id
+									);
+								}
 
 								continue;
 							}
 
-							if (confirmationResult.action === "confirm") {
-								const { appointment, slot } = confirmationResult;
+							/*
+							 * 2. Cliente não confirmou
+							 *
+							 * 2/3 slots:
+							 *   reapresenta os mesmos slots.
+							 *
+							 * 1 slot:
+							 *   fecha a sessão.
+							 *
+							 * Nenhuma nova consulta ao
+							 * Google Calendar é feita aqui.
+							 */
+							if (buttonId.startsWith("cancel:")) {
+								const cancellationResult =
+									await schedulingCancellationService.resolveCancellation({
+										buttonId,
+										conversationId: conversation.id,
+										leadId: lead.id,
+									});
 
-								const finalReply = `Agendamento confirmado para ${formatSlotDate(
-									slot.startAt
-								)} com ${slot.consultantName}.`;
+								if (!cancellationResult.ok) {
+									request.log.warn({
+										event: "whatsapp_scheduling_cancellation_rejected",
+										reason: cancellationResult.reason,
+										buttonId,
+										leadId: lead.id,
+										conversationId: conversation.id,
+										externalId,
+									});
+
+									if (eventReceipt.event?.id) {
+										await markWhatsAppWebhookEventProcessed(
+											eventReceipt.event.id
+										);
+									}
+
+									continue;
+								}
+
+								if (cancellationResult.action === "reoffer") {
+									const buttons = cancellationResult.slots.map((slot) => ({
+										id: slot.id,
+										title: formatSlotDate(slot.startAt),
+									}));
+
+									try {
+										const sendResponse = await sendCompliantButtons({
+											body: "Tudo bem. Tenho estes horários disponíveis:",
+											buttons,
+											conversationId: conversation.id,
+											leadId: lead.id,
+											to: lead.phone,
+										});
+
+										const outboundWamid = sendResponse.messages[0]?.id;
+
+										request.log.info({
+											event: "whatsapp_scheduling_offer_reoffered",
+											sessionId: cancellationResult.session.id,
+											slotCount: cancellationResult.slots.length,
+											leadId: lead.id,
+											conversationId: conversation.id,
+											externalId,
+											outboundWamid,
+										});
+									} catch (err) {
+										request.log.error(
+											{
+												err,
+												event: "whatsapp_scheduling_reoffer_send_failed",
+												leadId: lead.id,
+												conversationId: conversation.id,
+												sessionId: cancellationResult.session.id,
+												externalId,
+											},
+											"Failed to reoffer scheduling slots to WhatsApp"
+										);
+									}
+
+									if (eventReceipt.event?.id) {
+										await markWhatsAppWebhookEventProcessed(
+											eventReceipt.event.id
+										);
+									}
+
+									continue;
+								}
+
+								const finalReply =
+									"Tudo bem. Esse horário não foi confirmado. Quando quiser, podemos consultar novos horários.";
 
 								try {
 									const sendResponse = await sendCompliantText({
@@ -274,10 +537,11 @@ export const webhookWhatsApp: FastifyPluginCallbackZod = (app, _opts, done) => {
 									const outboundWamid = sendResponse.messages[0]?.id;
 
 									request.log.info({
-										event: "whatsapp_scheduling_confirmed",
-										appointmentId: appointment.appointmentId,
-										conversationId: conversation.id,
+										event:
+											"whatsapp_scheduling_session_closed_after_cancellation",
+										sessionId: cancellationResult.session.id,
 										leadId: lead.id,
+										conversationId: conversation.id,
 										externalId,
 										outboundWamid,
 									});
@@ -285,208 +549,116 @@ export const webhookWhatsApp: FastifyPluginCallbackZod = (app, _opts, done) => {
 									request.log.error(
 										{
 											err,
-											event: "whatsapp_scheduling_confirmation_send_failed",
-											appointmentId: appointment.appointmentId,
-											conversationId: conversation.id,
+											event: "whatsapp_scheduling_cancellation_send_failed",
+											sessionId: cancellationResult.session.id,
 											leadId: lead.id,
+											conversationId: conversation.id,
 											externalId,
 										},
-										"Failed to send scheduling confirmation to WhatsApp"
+										"Failed to send scheduling cancellation message to WhatsApp"
 									);
 								}
+
+								if (eventReceipt.event?.id) {
+									await markWhatsAppWebhookEventProcessed(
+										eventReceipt.event.id
+									);
+								}
+
+								continue;
 							}
 
-							continue;
-						}
+							const choiceResult = await schedulingChoiceService.resolveChoice({
+								buttonId,
+								conversationId: conversation.id,
+								leadId: lead.id,
+							});
 
-						/*
-						 * 2. Cliente não confirmou
-						 *
-						 * 2/3 slots:
-						 *   reapresenta os mesmos slots.
-						 *
-						 * 1 slot:
-						 *   fecha a sessão.
-						 *
-						 * Nenhuma nova consulta ao
-						 * Google Calendar é feita aqui.
-						 */
-						if (buttonId.startsWith("cancel:")) {
-							const cancellationResult =
-								await schedulingCancellationService.resolveCancellation({
-									buttonId,
-									conversationId: conversation.id,
-									leadId: lead.id,
-								});
-
-							if (!cancellationResult.ok) {
+							if (!choiceResult.ok) {
 								request.log.warn({
-									event: "whatsapp_scheduling_cancellation_rejected",
-									reason: cancellationResult.reason,
+									event: "whatsapp_scheduling_choice_rejected",
+									reason: choiceResult.reason,
 									buttonId,
 									leadId: lead.id,
 									conversationId: conversation.id,
 									externalId,
 								});
 
-								continue;
-							}
-
-							if (cancellationResult.action === "reoffer") {
-								const buttons = cancellationResult.slots.map((slot) => ({
-									id: slot.id,
-									title: formatSlotDate(slot.startAt),
-								}));
-
-								try {
-									const sendResponse = await sendCompliantButtons({
-										body: "Tudo bem. Tenho estes horários disponíveis:",
-										buttons,
-										conversationId: conversation.id,
-										leadId: lead.id,
-										to: lead.phone,
-									});
-
-									const outboundWamid = sendResponse.messages[0]?.id;
-
-									request.log.info({
-										event: "whatsapp_scheduling_offer_reoffered",
-										sessionId: cancellationResult.session.id,
-										slotCount: cancellationResult.slots.length,
-										leadId: lead.id,
-										conversationId: conversation.id,
-										externalId,
-										outboundWamid,
-									});
-								} catch (err) {
-									request.log.error(
-										{
-											err,
-											event: "whatsapp_scheduling_reoffer_send_failed",
-											leadId: lead.id,
-											conversationId: conversation.id,
-											sessionId: cancellationResult.session.id,
-											externalId,
-										},
-										"Failed to reoffer scheduling slots to WhatsApp"
+								if (eventReceipt.event?.id) {
+									await markWhatsAppWebhookEventProcessed(
+										eventReceipt.event.id
 									);
 								}
 
 								continue;
 							}
 
-							/*
-							 * Apenas 1 slot:
-							 * a sessão já foi fechada pelo
-							 * SchedulingCancellationService.
-							 */
-							const finalReply =
-								"Tudo bem. Esse horário não foi confirmado. Quando quiser, podemos consultar novos horários.";
+							const confirmation =
+								schedulingConfirmationService.buildConfirmationMessage(
+									choiceResult.slot
+								);
 
 							try {
-								const sendResponse = await sendCompliantText({
+								const sendResponse = await sendCompliantButtons({
+									body: confirmation.body,
+									buttons: confirmation.buttons,
 									conversationId: conversation.id,
 									leadId: lead.id,
-									text: finalReply,
 									to: lead.phone,
 								});
 
-								const outboundWamid = sendResponse.messages[0]?.id;
-
 								request.log.info({
-									event:
-										"whatsapp_scheduling_session_closed_after_cancellation",
-									sessionId: cancellationResult.session.id,
-									leadId: lead.id,
-									conversationId: conversation.id,
-									externalId,
-									outboundWamid,
-								});
-							} catch (err) {
-								request.log.error(
-									{
-										err,
-										event: "whatsapp_scheduling_cancellation_send_failed",
-										sessionId: cancellationResult.session.id,
-										leadId: lead.id,
-										conversationId: conversation.id,
-										externalId,
-									},
-									"Failed to send scheduling cancellation message to WhatsApp"
-								);
-							}
-
-							continue;
-						}
-
-						/*
-						 * 3. Seleção de horário
-						 *
-						 * buttonId é o UUID persistido
-						 * do scheduling_slot.
-						 */
-						const choiceResult = await schedulingChoiceService.resolveChoice({
-							buttonId,
-							conversationId: conversation.id,
-							leadId: lead.id,
-						});
-
-						if (!choiceResult.ok) {
-							request.log.warn({
-								event: "whatsapp_scheduling_choice_rejected",
-								reason: choiceResult.reason,
-								buttonId,
-								leadId: lead.id,
-								conversationId: conversation.id,
-								externalId,
-							});
-
-							continue;
-						}
-
-						const confirmation =
-							schedulingConfirmationService.buildConfirmationMessage(
-								choiceResult.slot
-							);
-
-						try {
-							const sendResponse = await sendCompliantButtons({
-								body: confirmation.body,
-								buttons: confirmation.buttons,
-								conversationId: conversation.id,
-								leadId: lead.id,
-								to: lead.phone,
-							});
-
-							request.log.info({
-								event: "whatsapp_scheduling_confirmation_sent",
-								buttonId,
-								slotId: choiceResult.slot.id,
-								sessionId: choiceResult.session.id,
-								leadId: lead.id,
-								conversationId: conversation.id,
-								externalId,
-								outboundWamid: sendResponse.messages[0]?.id,
-							});
-						} catch (err) {
-							request.log.error(
-								{
-									err,
-									event: "whatsapp_scheduling_confirmation_send_failed",
+									event: "whatsapp_scheduling_confirmation_sent",
 									buttonId,
 									slotId: choiceResult.slot.id,
 									sessionId: choiceResult.session.id,
 									leadId: lead.id,
 									conversationId: conversation.id,
 									externalId,
+									outboundWamid: sendResponse.messages[0]?.id,
+								});
+							} catch (err) {
+								request.log.error(
+									{
+										err,
+										event: "whatsapp_scheduling_confirmation_send_failed",
+										buttonId,
+										slotId: choiceResult.slot.id,
+										sessionId: choiceResult.session.id,
+										leadId: lead.id,
+										conversationId: conversation.id,
+										externalId,
+									},
+									"Failed to send scheduling confirmation to WhatsApp"
+								);
+							}
+
+							if (eventReceipt.event?.id) {
+								await markWhatsAppWebhookEventProcessed(eventReceipt.event.id);
+							}
+
+							continue;
+						} catch (err) {
+							if (eventReceipt.event?.id) {
+								await markWhatsAppWebhookEventFailed(
+									eventReceipt.event.id,
+									err instanceof Error ? err.message : String(err)
+								);
+							}
+
+							request.log.error(
+								{
+									err,
+									event: "whatsapp_button_reply_processing_failed",
+									externalId,
+									leadId: lead.id,
+									conversationId: conversation.id,
 								},
-								"Failed to send scheduling confirmation to WhatsApp"
+								"Failed to process WhatsApp button reply"
 							);
+							continue;
 						}
-
-						continue;
 					}
-
 					/*
 					 * Fluxo textual existente.
 					 *
@@ -499,51 +671,77 @@ export const webhookWhatsApp: FastifyPluginCallbackZod = (app, _opts, done) => {
 
 					const targetPhone = lead.phone;
 
-					await receiveCustomerMessage({
-						content,
-						conversationId: conversation.id,
-						externalId,
-						role: "user",
-						onMarianaResponse: async (marianaResult) => {
-							try {
-								const sendResponse = marianaResult.schedulingOffer
-									? await sendCompliantButtons({
-											...(marianaResult.schedulingOffer.slots.length === 1
-												? schedulingConfirmationService.buildSingleSlotConfirmationMessage(
-														marianaResult.schedulingOffer.slots[0]
-													)
-												: buildWhatsAppSchedulingOffer(
-														marianaResult.schedulingOffer.slots
-													)),
-											conversationId: conversation.id,
-											leadId: lead.id,
-											to: targetPhone,
-										})
-									: await sendCompliantText({
-											conversationId: conversation.id,
-											leadId: lead.id,
-											text: marianaResult.result.reply,
-											to: targetPhone,
-										});
+					try {
+						await receiveCustomerMessage({
+							content,
+							conversationId: conversation.id,
+							externalId,
+							role: "user",
+							onMarianaResponse: async (marianaResult) => {
+								try {
+									const sendResponse = marianaResult.schedulingOffer
+										? await sendCompliantButtons({
+												...(marianaResult.schedulingOffer.slots.length === 1
+													? schedulingConfirmationService.buildSingleSlotConfirmationMessage(
+															marianaResult.schedulingOffer.slots[0]
+														)
+													: buildWhatsAppSchedulingOffer(
+															marianaResult.schedulingOffer.slots
+														)),
+												conversationId: conversation.id,
+												leadId: lead.id,
+												to: targetPhone,
+											})
+										: await sendCompliantText({
+												conversationId: conversation.id,
+												leadId: lead.id,
+												text: marianaResult.result.reply,
+												to: targetPhone,
+											});
 
-								const outboundWamid = sendResponse.messages[0]?.id;
+									const outboundWamid = sendResponse.messages[0]?.id;
 
-								if (outboundWamid && marianaResult.assistantMessage?.id) {
-									await db
-										.update(messages)
-										.set({
-											externalId: outboundWamid,
-										})
-										.where(eq(messages.id, marianaResult.assistantMessage.id));
+									if (outboundWamid && marianaResult.assistantMessage?.id) {
+										await db
+											.update(messages)
+											.set({
+												externalId: outboundWamid,
+											})
+											.where(
+												eq(messages.id, marianaResult.assistantMessage.id)
+											);
+									}
+								} catch (err) {
+									console.error(
+										"[WhatsAppWebhook] Failed to send Mariana reply to WhatsApp:",
+										err
+									);
 								}
-							} catch (err) {
-								console.error(
-									"[WhatsAppWebhook] Failed to send Mariana reply to WhatsApp:",
-									err
-								);
-							}
-						},
-					});
+							},
+						});
+
+						if (eventReceipt.event?.id) {
+							await markWhatsAppWebhookEventProcessed(eventReceipt.event.id);
+						}
+					} catch (err) {
+						if (eventReceipt.event?.id) {
+							await markWhatsAppWebhookEventFailed(
+								eventReceipt.event.id,
+								err instanceof Error ? err.message : String(err)
+							);
+						}
+
+						request.log.error(
+							{
+								err,
+								event: "whatsapp_text_message_processing_failed",
+								externalId,
+								leadId: lead.id,
+								conversationId: conversation.id,
+							},
+							"Failed to process WhatsApp text message"
+						);
+					}
 				}
 			}
 		}

@@ -8,3 +8,4 @@ export * from "./leads";
 export * from "./messages";
 export * from "./scheduling-sessions";
 export * from "./scheduling-slots";
+export * from "./whatsapp-webhook-events";
