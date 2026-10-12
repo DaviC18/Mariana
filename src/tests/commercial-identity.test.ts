@@ -1,7 +1,12 @@
 /** biome-ignore-all lint/style/useFilenamingConvention: <> */
 import assert from "node:assert/strict";
 import test from "node:test";
+import { eq } from "drizzle-orm";
 
+import type {
+	GenerateMarianaReplyParams,
+	GenerateMarianaReplyResult,
+} from "../ai/agent";
 import { resolveBusinessProfile } from "../ai/business-profile";
 import { MARIANA_KNOWLEDGE } from "../ai/knowledge";
 import {
@@ -18,6 +23,19 @@ import {
 	sanitizeCommercialIdentity,
 } from "../services/conversations/mariana-safety";
 
+const NEUTRAL_IDENTITY_PROMPT_PATTERN =
+	/Você é Mariana, atendente virtual especializada no primeiro atendimento/;
+const NEUTRAL_INTRODUCTION_PROMPT_PATTERN =
+	/Você se identifica unicamente como Mariana, atendente virtual de consórcios/;
+const WELCOME_PATTERN = /Seja bem-vindo!/;
+const UNAUTHORIZED_COMPANY_MENTION_PATTERN = /unauthorized company mention/;
+const CONFIGURED_COMPANY_IDENTITY_PROMPT_PATTERN =
+	/Você é Mariana, atendente virtual da Empresa Teste/;
+const CONFIGURED_COMPANY_REPRESENTATION_PROMPT_PATTERN =
+	/Você representa a empresa "Empresa Teste"/;
+const PROPERTY_SEARCH_REPLY_PATTERN = /imóvel que você busca/;
+const MARIANA_INTRODUCTION_PATTERN = /Sou a Mariana/;
+
 test.after(async () => {
 	await closeDatabase();
 });
@@ -31,14 +49,8 @@ test("TEST 1: Cenário sem empresa configurada - Prompt e identidade neutra", ()
 		false,
 		"System prompt sem empresa configurada não deve conter 'Ademicon'"
 	);
-	assert.match(
-		prompt,
-		/Você é Mariana, atendente virtual especializada no primeiro atendimento/
-	);
-	assert.match(
-		prompt,
-		/Você se identifica unicamente como Mariana, atendente virtual de consórcios/
-	);
+	assert.match(prompt, NEUTRAL_IDENTITY_PROMPT_PATTERN);
+	assert.match(prompt, NEUTRAL_INTRODUCTION_PROMPT_PATTERN);
 
 	// Sanitização e guardrail para resposta recebida
 	const rawReply =
@@ -49,12 +61,12 @@ test("TEST 1: Cenário sem empresa configurada - Prompt e identidade neutra", ()
 		false,
 		"Sanitização deve remover menção à Ademicon"
 	);
-	assert.match(sanitized, /Seja bem-vindo!/);
+	assert.match(sanitized, WELCOME_PATTERN);
 
 	// Guardrail impede vazamento não sanitizado
 	assert.throws(
 		() => assertSafeMarianaReply(rawReply),
-		/unauthorized company mention/
+		UNAUTHORIZED_COMPANY_MENTION_PATTERN
 	);
 	// Mas aceita a resposta sanitizada
 	assert.doesNotThrow(() => assertSafeMarianaReply(sanitized));
@@ -69,8 +81,8 @@ test("TEST 2: Cenário com empresa configurada (Empresa Teste)", () => {
 		false,
 		"Não deve citar Ademicon quando outra empresa for configurada"
 	);
-	assert.match(prompt, /Você é Mariana, atendente virtual da Empresa Teste/);
-	assert.match(prompt, /Você representa a empresa "Empresa Teste"/);
+	assert.match(prompt, CONFIGURED_COMPANY_IDENTITY_PROMPT_PATTERN);
+	assert.match(prompt, CONFIGURED_COMPANY_REPRESENTATION_PROMPT_PATTERN);
 
 	const validReply =
 		"Olá! Sou a Mariana, assistente virtual da Empresa Teste. Como posso te ajudar hoje?";
@@ -79,7 +91,7 @@ test("TEST 2: Cenário com empresa configurada (Empresa Teste)", () => {
 	const leakingReply = "Olá! Seja bem-vindo à Ademicon.";
 	assert.throws(
 		() => assertSafeMarianaReply(leakingReply, profile),
-		/unauthorized company mention/
+		UNAUTHORIZED_COMPANY_MENTION_PATTERN
 	);
 });
 
@@ -104,7 +116,7 @@ test("TEST 3: Usuário pergunta 'Você é da Ademicon?'", () => {
 	);
 	assert.throws(
 		() => assertSafeMarianaReply(affirmativeUnauthorizedReply),
-		/unauthorized company mention/
+		UNAUTHORIZED_COMPANY_MENTION_PATTERN
 	);
 
 	// Cenário B: Empresa = Ademicon
@@ -198,13 +210,12 @@ test("TEST 5: Qualificação e nextAction preservados com BusinessProfile", asyn
 		| ReturnType<typeof resolveBusinessProfile>
 		| undefined;
 
-	const mockGenerateMarianaReplyFn = async (params: {
-		businessProfile?: ReturnType<typeof resolveBusinessProfile>;
-		lead: { status: string };
-	}) => {
+	const mockGenerateMarianaReplyFn = (
+		params: GenerateMarianaReplyParams
+	): Promise<GenerateMarianaReplyResult> => {
 		capturedBusinessProfile = params.businessProfile;
 
-		return {
+		return Promise.resolve({
 			metadata: {
 				latencyMs: 10,
 				model: "mock-model",
@@ -222,7 +233,7 @@ test("TEST 5: Qualificação e nextAction preservados com BusinessProfile", asyn
 				reply:
 					"Olá! Perfeito, me conte mais sobre o tipo de imóvel que você busca.",
 			},
-		};
+		});
 	};
 
 	const testProfile = { companyName: "Imobiliária Futuro" };
@@ -230,8 +241,7 @@ test("TEST 5: Qualificação e nextAction preservados com BusinessProfile", asyn
 	const result = await generateMarianaResponse({
 		businessProfile: testProfile,
 		currentMessages: ["Olá, quero comprar um apartamento."],
-		// biome-ignore lint/suspicious/noExplicitAny: mock for test
-		generateMarianaReplyFn: mockGenerateMarianaReplyFn as any,
+		generateMarianaReplyFn: mockGenerateMarianaReplyFn,
 		leadId: lead.id,
 		persistUserMessage: true,
 	});
@@ -240,21 +250,23 @@ test("TEST 5: Qualificação e nextAction preservados com BusinessProfile", asyn
 	assert.deepEqual(capturedBusinessProfile, testProfile);
 
 	// Verifica se a resposta foi preservada
-	assert.match(result.result.reply, /imóvel que você busca/);
+	assert.match(result.result.reply, PROPERTY_SEARCH_REPLY_PATTERN);
 	assert.equal(result.result.nextAction, "continue_qualification");
+	assert.equal(result.assistantMessage?.conversationId, conversation.id);
 
 	// Verifica se a atualização de qualificação do lead foi persistida
 	const [updatedLead] = await db
 		.select()
 		.from(leads)
-		.where(leads.id === lead.id ? leads.id : undefined);
+		.where(eq(leads.id, lead.id));
 
 	assert.equal(result.result.leadUpdate.consortiumType, "imóvel");
+	assert.equal(updatedLead?.consortiumType, "imóvel");
+	assert.equal(updatedLead?.objective, "Comprar primeiro apartamento");
+	assert.equal(updatedLead?.status, "qualifying");
 });
 
 test("TEST 6: Webhook / WhatsApp - Resposta final não contém Ademicon quando não configurada", () => {
-	const userMessage = "Olá Mariana Teste";
-
 	// Simula a geração da resposta que seria enviada pelo WhatsApp
 	const rawReplyFromModel =
 		"Olá! Seja bem-vindo à Ademicon. Sou a Mariana, sua assistente virtual de consórcios. Como posso te ajudar hoje?";
@@ -270,5 +282,5 @@ test("TEST 6: Webhook / WhatsApp - Resposta final não contém Ademicon quando n
 		false,
 		"A resposta enviada para o WhatsApp não deve conter 'Ademicon'"
 	);
-	assert.match(sanitizedReply, /Sou a Mariana/);
+	assert.match(sanitizedReply, MARIANA_INTRODUCTION_PATTERN);
 });

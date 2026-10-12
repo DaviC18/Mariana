@@ -42,6 +42,7 @@ export class AppointmentServiceError extends Error {
 		| "invalid_time_range"
 		| "lead_not_found"
 		| "lead_not_qualified"
+		| "scheduling_session_invalid"
 		| "scheduling_session_expired"
 		| "slot_unavailable";
 
@@ -52,6 +53,7 @@ export class AppointmentServiceError extends Error {
 			| "invalid_time_range"
 			| "lead_not_found"
 			| "lead_not_qualified"
+			| "scheduling_session_invalid"
 			| "scheduling_session_expired"
 			| "slot_unavailable",
 		message: string
@@ -59,6 +61,58 @@ export class AppointmentServiceError extends Error {
 		super(message);
 		this.code = code;
 		this.name = "AppointmentServiceError";
+	}
+}
+
+async function validateSchedulingSession(
+	sessionId: string,
+	leadId: string,
+	now: Date
+): Promise<void> {
+	if (!sessionId) {
+		throw new AppointmentServiceError(
+			"scheduling_session_invalid",
+			"A sessão de agendamento não existe ou não pertence a este lead."
+		);
+	}
+
+	const [session] = await db
+		.select({
+			expiresAt: schedulingSessions.expiresAt,
+			leadId: schedulingSessions.leadId,
+			status: schedulingSessions.status,
+		})
+		.from(schedulingSessions)
+		.where(eq(schedulingSessions.id, sessionId))
+		.limit(1);
+
+	if (!session || session.leadId !== leadId) {
+		throw new AppointmentServiceError(
+			"scheduling_session_invalid",
+			"A sessão de agendamento não existe ou não pertence a este lead."
+		);
+	}
+
+	if (session.status === "expired") {
+		throw new AppointmentServiceError(
+			"scheduling_session_expired",
+			"A sessão de agendamento expirou."
+		);
+	}
+
+	if (session.status !== "active") {
+		throw new AppointmentServiceError(
+			"scheduling_session_invalid",
+			"A sessão de agendamento não está mais ativa."
+		);
+	}
+
+	if (session.expiresAt <= now) {
+		await expireSchedulingSessionIfOverdue(db, sessionId, now);
+		throw new AppointmentServiceError(
+			"scheduling_session_expired",
+			"A sessão de agendamento expirou."
+		);
 	}
 }
 
@@ -128,27 +182,12 @@ export class AppointmentService {
 			);
 		}
 
-		if (input.schedulingSessionId) {
-			const [session] = await db
-				.select({
-					expiresAt: schedulingSessions.expiresAt,
-					status: schedulingSessions.status,
-				})
-				.from(schedulingSessions)
-				.where(eq(schedulingSessions.id, input.schedulingSessionId))
-				.limit(1);
-
-			if (session?.status === "active" && session.expiresAt <= now) {
-				await expireSchedulingSessionIfOverdue(
-					db,
-					input.schedulingSessionId,
-					now
-				);
-				throw new AppointmentServiceError(
-					"scheduling_session_expired",
-					"A sessão de agendamento expirou."
-				);
-			}
+		if (input.schedulingSessionId !== undefined) {
+			await validateSchedulingSession(
+				input.schedulingSessionId,
+				input.leadId,
+				now
+			);
 		}
 
 		const [conflictingAppointment] = await db
@@ -185,6 +224,16 @@ export class AppointmentService {
 			);
 		}
 
+		const finalizationNow = input.now ?? new Date();
+		if (input.schedulingSessionId !== undefined) {
+			await validateSchedulingSession(
+				input.schedulingSessionId,
+				input.leadId,
+				finalizationNow
+			);
+		}
+
+		// The final conditional close detects lifecycle races; the catch compensates if it loses.
 		const calendarEvent = await this.googleCalendarService.createEvent({
 			calendarId: consultant.calendarId,
 			description: `Agendamento da Mariana para o lead ${input.leadId}.`,
@@ -203,19 +252,19 @@ export class AppointmentService {
 				 * O fechamento ocorre dentro da mesma transação
 				 * do appointment e da atualização do lead.
 				 */
-				if (input.schedulingSessionId) {
+				if (input.schedulingSessionId !== undefined) {
 					const [closedSession] = await tx
 						.update(schedulingSessions)
 						.set({
 							status: "closed",
-							updatedAt: now,
+							updatedAt: finalizationNow,
 						})
 						.where(
 							and(
 								eq(schedulingSessions.id, input.schedulingSessionId),
 								eq(schedulingSessions.leadId, input.leadId),
 								eq(schedulingSessions.status, "active"),
-								gt(schedulingSessions.expiresAt, now)
+								gt(schedulingSessions.expiresAt, finalizationNow)
 							)
 						)
 						.returning({

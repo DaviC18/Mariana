@@ -23,23 +23,30 @@ import {
 function createMockGoogleCalendarService() {
 	let eventId = "google-event-test";
 	let busy = false;
+	let getBusyPeriodsCalls = 0;
+	let createEventCalls = 0;
 
 	const service = {
-		getBusyPeriods: (calendarIds: string[], start: Date, end: Date) => [
-			{
-				busy: busy
-					? [
-							{
-								start: start.toISOString(),
-								end: end.toISOString(),
-							},
-						]
-					: [],
-				calendarId: calendarIds[0] ?? "test-calendar",
-			},
-		],
+		getBusyPeriods: (calendarIds: string[], start: Date, end: Date) => {
+			getBusyPeriodsCalls += 1;
+
+			return [
+				{
+					busy: busy
+						? [
+								{
+									start: start.toISOString(),
+									end: end.toISOString(),
+								},
+							]
+						: [],
+					calendarId: calendarIds[0] ?? "test-calendar",
+				},
+			];
+		},
 
 		createEvent: () => {
+			createEventCalls += 1;
 			busy = true;
 
 			return {
@@ -58,6 +65,10 @@ function createMockGoogleCalendarService() {
 		setEventId(value: string) {
 			eventId = value;
 		},
+
+		getCallCounts() {
+			return { createEventCalls, getBusyPeriodsCalls };
+		},
 	};
 
 	return service as any;
@@ -68,6 +79,147 @@ test.after(async () => {
 });
 
 const TEST_PHONE = `551199${Date.now().toString().slice(-8)}`;
+
+const FIXED_NOW = new Date("2026-10-12T10:00:00.000Z");
+
+async function createSchedulingFixture({
+	expiresAt = new Date("2026-10-12T10:15:00.000Z"),
+	sessionLeadIsDifferent = false,
+	sessionStatus = "active",
+}: {
+	expiresAt?: Date;
+	sessionLeadIsDifferent?: boolean;
+	sessionStatus?: "active" | "closed" | "expired";
+} = {}) {
+	const [consultant] = await db
+		.select({
+			calendarId: consultants.calendarId,
+			id: consultants.id,
+			name: consultants.name,
+		})
+		.from(consultants)
+		.where(eq(consultants.active, true))
+		.limit(1);
+
+	assert.ok(consultant);
+
+	const testPhone = `55119${Date.now()}${Math.floor(Math.random() * 1000)}`;
+	const [lead] = await db
+		.insert(leads)
+		.values({
+			consortiumType: "geral",
+			name: "Lead Teste Scheduling Session",
+			objective: "Teste de validade da sessão",
+			phone: testPhone,
+			status: "qualified",
+		})
+		.returning({ id: leads.id });
+
+	assert.ok(lead);
+
+	let sessionLeadId = lead.id;
+	let otherLeadId: string | undefined;
+	if (sessionLeadIsDifferent) {
+		const [otherLead] = await db
+			.insert(leads)
+			.values({
+				consortiumType: "geral",
+				name: "Lead Dono da Sessão",
+				objective: "Teste de ownership da sessão",
+				phone: `${testPhone}9`,
+				status: "qualified",
+			})
+			.returning({ id: leads.id });
+
+		assert.ok(otherLead);
+		sessionLeadId = otherLead.id;
+		otherLeadId = otherLead.id;
+	}
+
+	const [conversation] = await db
+		.insert(conversations)
+		.values({ leadId: sessionLeadId })
+		.returning({ id: conversations.id });
+
+	assert.ok(conversation);
+
+	const [session] = await db
+		.insert(schedulingSessions)
+		.values({
+			conversationId: conversation.id,
+			createdAt: FIXED_NOW,
+			expiresAt,
+			leadId: sessionLeadId,
+			status: sessionStatus,
+			updatedAt: FIXED_NOW,
+		})
+		.returning({ id: schedulingSessions.id });
+
+	assert.ok(session);
+
+	return {
+		consultant,
+		conversationId: conversation.id,
+		leadId: lead.id,
+		otherLeadId,
+		sessionId: session.id,
+	};
+}
+
+async function assertNoAppointment(leadId: string) {
+	const foundAppointments = await db
+		.select({ id: appointments.id })
+		.from(appointments)
+		.where(eq(appointments.leadId, leadId));
+
+	assert.equal(foundAppointments.length, 0);
+}
+
+async function assertSchedulingSessionRejected(
+	fixture: Awaited<ReturnType<typeof createSchedulingFixture>>,
+	expectedCode: string
+) {
+	const calendarService = createMockGoogleCalendarService();
+	const service = new AppointmentService(calendarService);
+
+	await assert.rejects(
+		() =>
+			service.createConfirmedAppointment({
+				consultantId: fixture.consultant.id,
+				endAt: new Date("2035-01-01T13:30:00.000Z"),
+				leadId: fixture.leadId,
+				now: FIXED_NOW,
+				schedulingSessionId: fixture.sessionId,
+				startAt: new Date("2035-01-01T13:00:00.000Z"),
+			}),
+		(error: any) => error.code === expectedCode
+	);
+
+	assert.deepEqual(calendarService.getCallCounts(), {
+		createEventCalls: 0,
+		getBusyPeriodsCalls: 0,
+	});
+	await assertNoAppointment(fixture.leadId);
+}
+
+async function cleanupSchedulingFixture(fixture: {
+	conversationId: string;
+	leadId: string;
+	otherLeadId?: string;
+	sessionId: string;
+}) {
+	await db.delete(appointments).where(eq(appointments.leadId, fixture.leadId));
+	await db
+		.delete(schedulingSessions)
+		.where(eq(schedulingSessions.id, fixture.sessionId));
+	await db
+		.delete(conversations)
+		.where(eq(conversations.id, fixture.conversationId));
+	if (fixture.otherLeadId) {
+		await db.delete(leads).where(eq(leads.id, fixture.otherLeadId));
+	}
+	await db.delete(leads).where(eq(leads.id, fixture.leadId));
+}
 
 test("cria appointment confirmado com Google Calendar mockado", async () => {
 	const mockGoogleCalendarService = createMockGoogleCalendarService();
@@ -350,9 +502,11 @@ test("fecha scheduling session na mesma transação da confirmação do appointm
 		.insert(schedulingSessions)
 		.values({
 			conversationId: conversation.id,
-			expiresAt: new Date(Date.now() + 15 * 60 * 1000),
+			createdAt: FIXED_NOW,
+			expiresAt: new Date(FIXED_NOW.getTime() + 15 * 60 * 1000),
 			leadId: lead.id,
 			status: "active",
+			updatedAt: FIXED_NOW,
 		})
 		.returning();
 
@@ -385,6 +539,7 @@ test("fecha scheduling session na mesma transação da confirmação do appointm
 			consultantId: consultant.id,
 			endAt,
 			leadId: lead.id,
+			now: FIXED_NOW,
 			schedulingSessionId: session.id,
 			startAt,
 		});
@@ -440,5 +595,237 @@ test("fecha scheduling session na mesma transação da confirmação do appointm
 		await db.delete(conversations).where(eq(conversations.id, conversation.id));
 
 		await db.delete(leads).where(eq(leads.id, lead.id));
+	}
+});
+
+test("expira e rejeita sessão ativa no instante do vencimento sem chamar Calendar", async () => {
+	const fixture = await createSchedulingFixture({ expiresAt: FIXED_NOW });
+
+	try {
+		await assertSchedulingSessionRejected(
+			fixture,
+			"scheduling_session_expired"
+		);
+
+		const [updatedSession] = await db
+			.select({
+				expiresAt: schedulingSessions.expiresAt,
+				status: schedulingSessions.status,
+				updatedAt: schedulingSessions.updatedAt,
+			})
+			.from(schedulingSessions)
+			.where(eq(schedulingSessions.id, fixture.sessionId))
+			.limit(1);
+
+		assert.equal(updatedSession?.status, "expired");
+		assert.equal(updatedSession?.expiresAt.getTime(), FIXED_NOW.getTime());
+		assert.equal(updatedSession?.updatedAt.getTime(), FIXED_NOW.getTime());
+	} finally {
+		await cleanupSchedulingFixture(fixture);
+	}
+});
+
+test("rejeita sessão já expirada sem chamar Calendar", async () => {
+	const fixture = await createSchedulingFixture({
+		sessionStatus: "expired",
+	});
+
+	try {
+		await assertSchedulingSessionRejected(
+			fixture,
+			"scheduling_session_expired"
+		);
+
+		const [session] = await db
+			.select({ status: schedulingSessions.status })
+			.from(schedulingSessions)
+			.where(eq(schedulingSessions.id, fixture.sessionId))
+			.limit(1);
+
+		assert.equal(session?.status, "expired");
+	} finally {
+		await cleanupSchedulingFixture(fixture);
+	}
+});
+
+test("rejeita sessão fechada sem reclassificá-la como expirada", async () => {
+	const fixture = await createSchedulingFixture({
+		expiresAt: new Date("2026-10-12T09:59:59.999Z"),
+		sessionStatus: "closed",
+	});
+
+	try {
+		await assertSchedulingSessionRejected(
+			fixture,
+			"scheduling_session_invalid"
+		);
+
+		const [session] = await db
+			.select({ status: schedulingSessions.status })
+			.from(schedulingSessions)
+			.where(eq(schedulingSessions.id, fixture.sessionId))
+			.limit(1);
+
+		assert.equal(session?.status, "closed");
+	} finally {
+		await cleanupSchedulingFixture(fixture);
+	}
+});
+
+test("rejeita sessão inexistente sem chamar Calendar", async () => {
+	const fixture = await createSchedulingFixture();
+
+	try {
+		await db
+			.delete(schedulingSessions)
+			.where(eq(schedulingSessions.id, fixture.sessionId));
+
+		await assertSchedulingSessionRejected(
+			fixture,
+			"scheduling_session_invalid"
+		);
+	} finally {
+		await cleanupSchedulingFixture(fixture);
+	}
+});
+
+test("rejeita ID de sessão vazio sem tratar como fluxo sem sessão", async () => {
+	const fixture = await createSchedulingFixture();
+	const calendarService = createMockGoogleCalendarService();
+	const service = new AppointmentService(calendarService);
+
+	try {
+		await assert.rejects(
+			() =>
+				service.createConfirmedAppointment({
+					consultantId: fixture.consultant.id,
+					endAt: new Date("2035-01-01T13:30:00.000Z"),
+					leadId: fixture.leadId,
+					now: FIXED_NOW,
+					schedulingSessionId: "",
+					startAt: new Date("2035-01-01T13:00:00.000Z"),
+				}),
+			(error: any) => error.code === "scheduling_session_invalid"
+		);
+
+		assert.deepEqual(calendarService.getCallCounts(), {
+			createEventCalls: 0,
+			getBusyPeriodsCalls: 0,
+		});
+		await assertNoAppointment(fixture.leadId);
+	} finally {
+		await cleanupSchedulingFixture(fixture);
+	}
+});
+
+test("rejeita sessão pertencente a outro lead sem chamar Calendar", async () => {
+	const fixture = await createSchedulingFixture({
+		sessionLeadIsDifferent: true,
+	});
+
+	try {
+		await assertSchedulingSessionRejected(
+			fixture,
+			"scheduling_session_invalid"
+		);
+
+		const [session] = await db
+			.select({
+				leadId: schedulingSessions.leadId,
+				status: schedulingSessions.status,
+			})
+			.from(schedulingSessions)
+			.where(eq(schedulingSessions.id, fixture.sessionId))
+			.limit(1);
+
+		assert.equal(session?.leadId, fixture.otherLeadId);
+		assert.equal(session?.status, "active");
+	} finally {
+		await cleanupSchedulingFixture(fixture);
+	}
+});
+
+test("revalida a sessão após disponibilidade antes de criar evento", async () => {
+	const fixture = await createSchedulingFixture();
+	let createEventCalls = 0;
+	let deleteEventCalls = 0;
+	const calendarService = {
+		getBusyPeriods: async () => {
+			await db
+				.update(schedulingSessions)
+				.set({ status: "closed" })
+				.where(eq(schedulingSessions.id, fixture.sessionId));
+
+			return [{ busy: [], calendarId: fixture.consultant.calendarId }];
+		},
+		createEvent: () => {
+			createEventCalls += 1;
+			return { id: "google-event-session-closed-before-create" };
+		},
+		deleteEvent: () => {
+			deleteEventCalls += 1;
+		},
+	} as any;
+
+	try {
+		const service = new AppointmentService(calendarService);
+
+		await assert.rejects(() =>
+			service.createConfirmedAppointment({
+				consultantId: fixture.consultant.id,
+				endAt: new Date("2035-01-01T13:30:00.000Z"),
+				leadId: fixture.leadId,
+				now: FIXED_NOW,
+				schedulingSessionId: fixture.sessionId,
+				startAt: new Date("2035-01-01T13:00:00.000Z"),
+			})
+		);
+
+		assert.equal(createEventCalls, 0);
+		assert.equal(deleteEventCalls, 0);
+		await assertNoAppointment(fixture.leadId);
+	} finally {
+		await cleanupSchedulingFixture(fixture);
+	}
+});
+
+test("descarta o evento se a sessão fechar durante a criação no Calendar", async () => {
+	const fixture = await createSchedulingFixture();
+	let deleteEventCalls = 0;
+	const calendarService = {
+		getBusyPeriods: () => [
+			{ busy: [], calendarId: fixture.consultant.calendarId },
+		],
+		createEvent: async () => {
+			await db
+				.update(schedulingSessions)
+				.set({ status: "closed" })
+				.where(eq(schedulingSessions.id, fixture.sessionId));
+
+			return { id: "google-event-raced-session" };
+		},
+		deleteEvent: () => {
+			deleteEventCalls += 1;
+		},
+	} as any;
+
+	try {
+		const service = new AppointmentService(calendarService);
+
+		await assert.rejects(() =>
+			service.createConfirmedAppointment({
+				consultantId: fixture.consultant.id,
+				endAt: new Date("2035-01-01T13:30:00.000Z"),
+				leadId: fixture.leadId,
+				now: FIXED_NOW,
+				schedulingSessionId: fixture.sessionId,
+				startAt: new Date("2035-01-01T13:00:00.000Z"),
+			})
+		);
+
+		assert.equal(deleteEventCalls, 1);
+		await assertNoAppointment(fixture.leadId);
+	} finally {
+		await cleanupSchedulingFixture(fixture);
 	}
 });
