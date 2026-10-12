@@ -761,6 +761,12 @@ test("Etapa 10 — oferta estruturada com exatamente 1 slot", async () => {
 	);
 
 	assert.equal(
+		persistedSession.selectedSlotId,
+		persistedSlots[0].id,
+		"O único slot deve ser selecionado antes da confirmação direta"
+	);
+
+	assert.equal(
 		result.schedulingOffer.slots[0].consultantId,
 		offeredSlot.consultant.id
 	);

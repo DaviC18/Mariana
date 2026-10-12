@@ -218,7 +218,7 @@ test("TEST 5: Qualificação e nextAction preservados com BusinessProfile", asyn
 					objective: "Comprar primeiro apartamento",
 					status: "qualifying" as const,
 				},
-				nextAction: "continue_conversation" as const,
+				nextAction: "continue_qualification" as const,
 				reply:
 					"Olá! Perfeito, me conte mais sobre o tipo de imóvel que você busca.",
 			},
@@ -241,7 +241,7 @@ test("TEST 5: Qualificação e nextAction preservados com BusinessProfile", asyn
 
 	// Verifica se a resposta foi preservada
 	assert.match(result.result.reply, /imóvel que você busca/);
-	assert.equal(result.result.nextAction, "continue_conversation");
+	assert.equal(result.result.nextAction, "continue_qualification");
 
 	// Verifica se a atualização de qualificação do lead foi persistida
 	const [updatedLead] = await db

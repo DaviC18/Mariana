@@ -101,10 +101,18 @@ async function createCancellationFixture(slotCount: number) {
 		slots.push(slot);
 	}
 
+	const [selectedSession] = await db
+		.update(schedulingSessions)
+		.set({ selectedSlotId: slots[0]?.id })
+		.where(eq(schedulingSessions.id, session.id))
+		.returning();
+
+	assert.ok(selectedSession);
+
 	return {
 		conversation,
 		lead,
-		session,
+		session: selectedSession,
 		slots,
 	};
 }
@@ -133,7 +141,7 @@ test("Não com 3 slots reapresenta a oferta e mantém a sessão ativa", async ()
 
 	try {
 		const result = await service.resolveCancellation({
-			buttonId: `cancel:${fixture.slots[1].id}`,
+			buttonId: `cancel:${fixture.slots[0].id}`,
 			conversationId: fixture.conversation.id,
 			leadId: fixture.lead.id,
 		});
@@ -212,6 +220,7 @@ test("Não com 1 slot fecha a sessão", async () => {
 
 		assert.equal(result.action, "close");
 		assert.equal(result.session.status, "closed");
+		assert.equal(result.session.selectedSlotId, null);
 		assert.equal(result.slots.length, 1);
 
 		const [storedSession] = await db
@@ -221,6 +230,7 @@ test("Não com 1 slot fecha a sessão", async () => {
 
 		assert.ok(storedSession);
 		assert.equal(storedSession.status, "closed");
+		assert.equal(storedSession.selectedSlotId, null);
 	} finally {
 		await cleanupFixture({
 			conversationId: fixture.conversation.id,

@@ -95,10 +95,34 @@ export class SchedulingCancellationService {
 		}
 
 		if (slots.length >= 2) {
+			const [reopenedSession] = await this.db
+				.update(schedulingSessions)
+				.set({
+					selectedSlotId: null,
+					updatedAt: now,
+				})
+				.where(
+					and(
+						eq(schedulingSessions.id, confirmationResult.session.id),
+						eq(schedulingSessions.leadId, leadId),
+						eq(schedulingSessions.conversationId, conversationId),
+						eq(schedulingSessions.selectedSlotId, confirmationResult.slot.id),
+						eq(schedulingSessions.status, "active")
+					)
+				)
+				.returning();
+
+			if (!reopenedSession) {
+				return {
+					ok: false,
+					reason: "session_close_failed",
+				};
+			}
+
 			return {
 				action: "reoffer",
 				ok: true,
-				session: confirmationResult.session,
+				session: reopenedSession,
 				slots,
 			};
 		}
@@ -106,6 +130,7 @@ export class SchedulingCancellationService {
 		const [closedSession] = await this.db
 			.update(schedulingSessions)
 			.set({
+				selectedSlotId: null,
 				status: "closed",
 				updatedAt: now,
 			})
@@ -113,6 +138,8 @@ export class SchedulingCancellationService {
 				and(
 					eq(schedulingSessions.id, confirmationResult.session.id),
 					eq(schedulingSessions.leadId, leadId),
+					eq(schedulingSessions.conversationId, conversationId),
+					eq(schedulingSessions.selectedSlotId, confirmationResult.slot.id),
 					eq(schedulingSessions.status, "active")
 				)
 			)

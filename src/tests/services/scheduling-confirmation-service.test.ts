@@ -99,11 +99,19 @@ async function createFixture() {
 
 	assert.ok(slot);
 
+	const [selectedSession] = await db
+		.update(schedulingSessions)
+		.set({ selectedSlotId: slot.id })
+		.where(eq(schedulingSessions.id, session.id))
+		.returning();
+
+	assert.ok(selectedSession);
+
 	return {
 		conversation,
 		lead,
 		now,
-		session,
+		session: selectedSession,
 		slot,
 	};
 }
@@ -375,6 +383,45 @@ test("rejeita confirmação quando a sessão está expirada", async () => {
 		assert.deepEqual(result, {
 			ok: false,
 			reason: "expired",
+		});
+	} finally {
+		await cleanupFixture({
+			conversationId: fixture.conversation.id,
+			leadId: fixture.lead.id,
+			sessionId: fixture.session.id,
+		});
+	}
+});
+
+test("rejeita confirmação de outro slot da mesma sessão que não foi selecionado", async () => {
+	const fixture = await createFixture();
+
+	try {
+		const [otherSlot] = await db
+			.insert(schedulingSlots)
+			.values({
+				calendarId: fixture.slot.calendarId,
+				consultantId: fixture.slot.consultantId,
+				consultantName: fixture.slot.consultantName,
+				endAt: new Date(fixture.slot.endAt.getTime() + 60 * 60 * 1000),
+				position: 2,
+				schedulingSessionId: fixture.session.id,
+				startAt: new Date(fixture.slot.startAt.getTime() + 60 * 60 * 1000),
+			})
+			.returning();
+
+		assert.ok(otherSlot);
+
+		const result = await schedulingConfirmationService.resolveConfirmation({
+			buttonId: `confirm:${otherSlot.id}`,
+			conversationId: fixture.conversation.id,
+			leadId: fixture.lead.id,
+			now: fixture.now,
+		});
+
+		assert.deepEqual(result, {
+			ok: false,
+			reason: "slot_not_selected",
 		});
 	} finally {
 		await cleanupFixture({

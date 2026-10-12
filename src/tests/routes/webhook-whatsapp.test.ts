@@ -17,6 +17,7 @@ import {
 import { ai } from "../../ai/client";
 import { closeDatabase, db } from "../../db/connections";
 import {
+	appointments,
 	consultants,
 	conversations,
 	leads,
@@ -1095,10 +1096,20 @@ test("POST /webhooks/whatsapp - oferta de agenda envia os slots persistidos como
 			.where(eq(schedulingSlots.schedulingSessionId, session.id))
 			.limit(1);
 		assert.ok(slot);
+		assert.equal(session.selectedSlotId, slot.id);
 		assert.deepEqual(
 			sentButtons?.map((button) => button.id),
-			[slot.id]
+			[`confirm:${slot.id}`, `cancel:${slot.id}`]
 		);
+		assert.deepEqual(
+			sentButtons?.map((button) => button.title),
+			["Confirmar", "Não"]
+		);
+		const createdAppointments = await db
+			.select()
+			.from(appointments)
+			.where(eq(appointments.leadId, lead.id));
+		assert.equal(createdAppointments.length, 0);
 	} finally {
 		await db
 			.delete(schedulingSessions)

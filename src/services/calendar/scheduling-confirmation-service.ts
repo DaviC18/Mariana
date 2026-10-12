@@ -146,12 +146,13 @@ export class SchedulingConfirmationService {
 			return actionResult;
 		}
 
-		const choiceResult = await this.schedulingChoiceService.resolveChoice({
-			buttonId: actionResult.slotId,
-			conversationId: input.conversationId,
-			leadId: input.leadId,
-			now: input.now,
-		});
+		const choiceResult =
+			await this.schedulingChoiceService.resolveSelectedChoice({
+				buttonId: actionResult.slotId,
+				conversationId: input.conversationId,
+				leadId: input.leadId,
+				now: input.now,
+			});
 
 		if (!choiceResult.ok) {
 			return {

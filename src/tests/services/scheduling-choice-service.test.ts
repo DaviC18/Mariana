@@ -142,6 +142,55 @@ test("resolve seleção válida pelo ID persistido do slot", async () => {
 		assert.equal(result.slot.schedulingSessionId, fixture.session.id);
 		assert.equal(result.session.leadId, fixture.lead.id);
 		assert.equal(result.session.conversationId, fixture.conversation.id);
+		assert.equal(result.session.selectedSlotId, fixture.slot.id);
+	} finally {
+		await cleanupFixture(
+			fixture.lead.id,
+			fixture.conversation.id,
+			fixture.session.id
+		);
+	}
+});
+
+test("não permite que outra seleção sobrescreva o slot já escolhido", async () => {
+	const fixture = await createFixture();
+
+	try {
+		const [secondSlot] = await db
+			.insert(schedulingSlots)
+			.values({
+				calendarId: fixture.consultant.calendarId,
+				consultantId: fixture.consultant.id,
+				consultantName: fixture.consultant.name,
+				endAt: new Date(fixture.slot.endAt.getTime() + 60 * 60 * 1000),
+				position: 2,
+				schedulingSessionId: fixture.session.id,
+				startAt: new Date(fixture.slot.startAt.getTime() + 60 * 60 * 1000),
+			})
+			.returning();
+
+		assert.ok(secondSlot);
+
+		const firstSelection = await schedulingChoiceService.resolveChoice({
+			buttonId: fixture.slot.id,
+			conversationId: fixture.conversation.id,
+			leadId: fixture.lead.id,
+			now: fixture.now,
+		});
+
+		assert.equal(firstSelection.ok, true);
+
+		const secondSelection = await schedulingChoiceService.resolveChoice({
+			buttonId: secondSlot.id,
+			conversationId: fixture.conversation.id,
+			leadId: fixture.lead.id,
+			now: fixture.now,
+		});
+
+		assert.deepEqual(secondSelection, {
+			ok: false,
+			reason: "selection_already_made",
+		});
 	} finally {
 		await cleanupFixture(
 			fixture.lead.id,

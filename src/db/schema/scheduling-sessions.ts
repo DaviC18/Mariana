@@ -11,6 +11,7 @@ import {
 
 import { conversations } from "./conversations";
 import { leads } from "./leads";
+import { schedulingSlots } from "./scheduling-slots";
 
 export const schedulingSessionStatus = pgEnum("scheduling_session_status", [
 	"active",
@@ -32,6 +33,9 @@ export const schedulingSessions = pgTable(
 			.references(() => conversations.id, {
 				onDelete: "cascade",
 			}),
+		selectedSlotId: uuid().references(() => schedulingSlots.id, {
+			onDelete: "set null",
+		}),
 		status: schedulingSessionStatus().notNull().default("active"),
 		createdAt: timestamp({ withTimezone: true }).notNull().defaultNow(),
 		expiresAt: timestamp({ withTimezone: true }).notNull(),
@@ -43,6 +47,9 @@ export const schedulingSessions = pgTable(
 			table.conversationId
 		),
 		statusIdx: index("scheduling_sessions_status_idx").on(table.status),
+		selectedSlotIdIdx: index("scheduling_sessions_selected_slot_id_idx").on(
+			table.selectedSlotId
+		),
 		activeLeadUnique: uniqueIndex("scheduling_sessions_one_active_lead_unique")
 			.on(table.leadId)
 			.where(sql`${table.status} = 'active'`),

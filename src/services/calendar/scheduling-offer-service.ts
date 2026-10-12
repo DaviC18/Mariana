@@ -115,6 +115,22 @@ export class SchedulingOfferService {
 				.values(slotsToInsert)
 				.returning();
 
+			const [session] =
+				createdSlots.length === 1
+					? await tx
+							.update(schedulingSessions)
+							.set({
+								selectedSlotId: createdSlots[0]?.id,
+								updatedAt: now,
+							})
+							.where(eq(schedulingSessions.id, createdSession.id))
+							.returning()
+					: [createdSession];
+
+			if (!session) {
+				throw new Error("Failed to select the only scheduling slot");
+			}
+
 			// 4. Atualizar a mensagem assistente existente com finalReply
 			const [updatedAssistantMessage] = await tx
 				.update(messages)
@@ -137,7 +153,7 @@ export class SchedulingOfferService {
 				.where(eq(conversations.id, conversationId));
 
 			return {
-				session: createdSession,
+				session,
 				slots: createdSlots,
 				updatedAssistantMessage,
 			};
