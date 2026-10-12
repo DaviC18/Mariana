@@ -14,11 +14,13 @@ import {
 	GoogleCalendarService,
 } from "../../integrations/google-calendar/google-calendar-service";
 import { AGENDA_OCCUPYING_APPOINTMENT_STATUSES } from "../appointments/appointment-status";
+import { expireSchedulingSessionIfOverdue } from "./scheduling-session-expiration";
 
 export interface CreateAppointmentInput {
 	consultantId: string;
 	endAt: Date;
 	leadId: string;
+	now?: Date;
 	schedulingSessionId?: string;
 	startAt: Date;
 }
@@ -40,6 +42,7 @@ export class AppointmentServiceError extends Error {
 		| "invalid_time_range"
 		| "lead_not_found"
 		| "lead_not_qualified"
+		| "scheduling_session_expired"
 		| "slot_unavailable";
 
 	constructor(
@@ -49,6 +52,7 @@ export class AppointmentServiceError extends Error {
 			| "invalid_time_range"
 			| "lead_not_found"
 			| "lead_not_qualified"
+			| "scheduling_session_expired"
 			| "slot_unavailable",
 		message: string
 	) {
@@ -68,6 +72,7 @@ export class AppointmentService {
 	async createConfirmedAppointment(
 		input: CreateAppointmentInput
 	): Promise<CreatedAppointment> {
+		const now = input.now ?? new Date();
 		if (input.startAt >= input.endAt) {
 			throw new AppointmentServiceError(
 				"invalid_time_range",
@@ -121,6 +126,29 @@ export class AppointmentService {
 				"lead_not_qualified",
 				"O lead precisa estar qualificado antes do agendamento."
 			);
+		}
+
+		if (input.schedulingSessionId) {
+			const [session] = await db
+				.select({
+					expiresAt: schedulingSessions.expiresAt,
+					status: schedulingSessions.status,
+				})
+				.from(schedulingSessions)
+				.where(eq(schedulingSessions.id, input.schedulingSessionId))
+				.limit(1);
+
+			if (session?.status === "active" && session.expiresAt <= now) {
+				await expireSchedulingSessionIfOverdue(
+					db,
+					input.schedulingSessionId,
+					now
+				);
+				throw new AppointmentServiceError(
+					"scheduling_session_expired",
+					"A sessão de agendamento expirou."
+				);
+			}
 		}
 
 		const [conflictingAppointment] = await db
@@ -180,13 +208,14 @@ export class AppointmentService {
 						.update(schedulingSessions)
 						.set({
 							status: "closed",
-							updatedAt: new Date(),
+							updatedAt: now,
 						})
 						.where(
 							and(
 								eq(schedulingSessions.id, input.schedulingSessionId),
 								eq(schedulingSessions.leadId, input.leadId),
-								eq(schedulingSessions.status, "active")
+								eq(schedulingSessions.status, "active"),
+								gt(schedulingSessions.expiresAt, now)
 							)
 						)
 						.returning({
@@ -225,7 +254,7 @@ export class AppointmentService {
 					.update(leads)
 					.set({
 						status: "scheduled",
-						updatedAt: new Date(),
+						updatedAt: now,
 					})
 					.where(and(eq(leads.id, input.leadId), eq(leads.status, "qualified")))
 					.returning({

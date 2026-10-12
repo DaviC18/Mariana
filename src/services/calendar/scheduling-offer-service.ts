@@ -1,4 +1,4 @@
-import { and, eq } from "drizzle-orm";
+import { and, eq, gt, lte } from "drizzle-orm";
 
 import { db as defaultDb } from "../../db/connections";
 import {
@@ -67,7 +67,22 @@ export class SchedulingOfferService {
 		const expiresAt = new Date(now.getTime() + 15 * 60 * 1000);
 
 		return await this.db.transaction(async (tx) => {
-			// 1. Localizar e fechar session active anterior do mesmo lead
+			// 1. Expirar sessions vencidas antes de fechar uma oferta ainda válida.
+			await tx
+				.update(schedulingSessions)
+				.set({
+					status: "expired",
+					updatedAt: now,
+				})
+				.where(
+					and(
+						eq(schedulingSessions.leadId, leadId),
+						eq(schedulingSessions.status, "active"),
+						lte(schedulingSessions.expiresAt, now)
+					)
+				);
+
+			// 2. Fechar session active anterior ainda válida do mesmo lead.
 			await tx
 				.update(schedulingSessions)
 				.set({
@@ -77,11 +92,12 @@ export class SchedulingOfferService {
 				.where(
 					and(
 						eq(schedulingSessions.leadId, leadId),
-						eq(schedulingSessions.status, "active")
+						eq(schedulingSessions.status, "active"),
+						gt(schedulingSessions.expiresAt, now)
 					)
 				);
 
-			// 2. Criar a nova session active
+			// 3. Criar a nova session active
 			const [createdSession] = await tx
 				.insert(schedulingSessions)
 				.values({

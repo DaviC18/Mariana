@@ -1,6 +1,6 @@
 /** biome-ignore-all lint/style/noParameterProperties: <> */
 
-import { and, asc, eq } from "drizzle-orm";
+import { and, asc, eq, gt } from "drizzle-orm";
 
 import { db as defaultDb } from "../../db/connections";
 import { schedulingSessions, schedulingSlots } from "../../db/schema";
@@ -107,7 +107,8 @@ export class SchedulingCancellationService {
 						eq(schedulingSessions.leadId, leadId),
 						eq(schedulingSessions.conversationId, conversationId),
 						eq(schedulingSessions.selectedSlotId, confirmationResult.slot.id),
-						eq(schedulingSessions.status, "active")
+						eq(schedulingSessions.status, "active"),
+						gt(schedulingSessions.expiresAt, now)
 					)
 				)
 				.returning();
@@ -140,7 +141,8 @@ export class SchedulingCancellationService {
 					eq(schedulingSessions.leadId, leadId),
 					eq(schedulingSessions.conversationId, conversationId),
 					eq(schedulingSessions.selectedSlotId, confirmationResult.slot.id),
-					eq(schedulingSessions.status, "active")
+					eq(schedulingSessions.status, "active"),
+					gt(schedulingSessions.expiresAt, now)
 				)
 			)
 			.returning();

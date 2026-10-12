@@ -3,6 +3,7 @@ import { z } from "zod";
 
 import { db as defaultDb } from "../../db/connections";
 import { schedulingSessions, type schedulingSlots } from "../../db/schema";
+import { expireSchedulingSessionIfOverdue } from "./scheduling-session-expiration";
 
 const buttonIdSchema = z.string().uuid();
 
@@ -98,6 +99,7 @@ export class SchedulingChoiceService {
 		}
 
 		if (session.expiresAt <= now) {
+			await expireSchedulingSessionIfOverdue(this.db, session.id, now);
 			return {
 				ok: false,
 				reason: "expired",
@@ -192,6 +194,7 @@ export class SchedulingChoiceService {
 		}
 
 		if (session.expiresAt <= now) {
+			await expireSchedulingSessionIfOverdue(this.db, session.id, now);
 			return { ok: false, reason: "expired" };
 		}
 

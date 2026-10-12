@@ -288,7 +288,14 @@ test("Não rejeita sessão expirada", async () => {
 			leadId: fixture.lead.id,
 		});
 
-		assert.equal(result.ok, false);
+		assert.deepEqual(result, { ok: false, reason: "expired" });
+
+		const [expiredSession] = await db
+			.select({ status: schedulingSessions.status })
+			.from(schedulingSessions)
+			.where(eq(schedulingSessions.id, fixture.session.id));
+
+		assert.equal(expiredSession?.status, "expired");
 	} finally {
 		await cleanupFixture({
 			conversationId: fixture.conversation.id,

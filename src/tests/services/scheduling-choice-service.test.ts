@@ -337,6 +337,41 @@ test("rejeita sessão expirada mesmo que o status ainda seja active", async () =
 			ok: false,
 			reason: "expired",
 		});
+
+		const [expiredSession] = await db
+			.select({ status: schedulingSessions.status })
+			.from(schedulingSessions)
+			.where(eq(schedulingSessions.id, fixture.session.id));
+
+		assert.equal(expiredSession?.status, "expired");
+	} finally {
+		await cleanupFixture(
+			fixture.lead.id,
+			fixture.conversation.id,
+			fixture.session.id
+		);
+	}
+});
+
+test("expira a sessão quando expiresAt é igual a now", async () => {
+	const fixture = await createFixture();
+
+	try {
+		const result = await schedulingChoiceService.resolveChoice({
+			buttonId: fixture.slot.id,
+			conversationId: fixture.conversation.id,
+			leadId: fixture.lead.id,
+			now: fixture.session.expiresAt,
+		});
+
+		assert.deepEqual(result, { ok: false, reason: "expired" });
+
+		const [expiredSession] = await db
+			.select({ status: schedulingSessions.status })
+			.from(schedulingSessions)
+			.where(eq(schedulingSessions.id, fixture.session.id));
+
+		assert.equal(expiredSession?.status, "expired");
 	} finally {
 		await cleanupFixture(
 			fixture.lead.id,
