@@ -24,6 +24,7 @@ import {
 	messages,
 	schedulingSessions,
 	schedulingSlots,
+	whatsappWebhookEvents,
 } from "../../db/schema";
 import { env } from "../../env";
 import { WhatsAppService } from "../../integrations/whatsapp/whatsapp-service";
@@ -552,6 +553,286 @@ test("POST /webhooks/whatsapp - button_reply duplicado é ignorado após a prime
 		await db.delete(conversations).where(eq(conversations.id, conversation.id));
 		await db.delete(leads).where(eq(leads.id, lead.id));
 	}
+});
+
+test("POST /webhooks/whatsapp - eventos falhados são recuperados atomicamente e não duplicam processamento", async (t) => {
+	const app = buildApp();
+
+	t.after(() => app.close());
+
+	const testPhone = `55119${Math.floor(
+		10_000_000 + Math.random() * 90_000_000
+	)}`;
+	const inboundWamid = `wamid.concurrent_failed_${Date.now()}_${Math.random()
+		.toString(36)
+		.slice(7)}`;
+
+	const mockedGeminiResponse = {
+		text: JSON.stringify({
+			businessAction: "answer_basic_question",
+			evidenceUsed: [],
+			leadUpdate: { status: "qualifying" },
+			nextAction: "continue_qualification",
+			reply: "Resposta de reprocessamento.",
+		}),
+	} as GenerateContentResponse;
+
+	t.mock.method(ai.models, "generateContent", async () => mockedGeminiResponse);
+
+	let sendCount = 0;
+	const originalSendTextMessage = WhatsAppService.prototype.sendTextMessage;
+	WhatsAppService.prototype.sendTextMessage = async (
+		to: string,
+		_text: string
+	) => {
+		sendCount += 1;
+		return {
+			contacts: [{ input: to, wa_id: to }],
+			messages: [
+				{
+					id: `wamid.recover_${Date.now()}_${Math.random().toString(36).slice(7)}`,
+				},
+			],
+			messaging_product: "whatsapp",
+		};
+	};
+
+	t.after(() => {
+		WhatsAppService.prototype.sendTextMessage = originalSendTextMessage;
+	});
+
+	await db
+		.insert(whatsappWebhookEvents)
+		.values({
+			eventType: "text",
+			externalId: inboundWamid,
+			lastError: "previous failure",
+			payload: {
+				content: "Quero recuperar este evento",
+				message: {
+					from: testPhone,
+					id: inboundWamid,
+					type: "text",
+				},
+			},
+			phone: testPhone,
+			status: "failed",
+		})
+		.onConflictDoNothing();
+
+	const payload = JSON.stringify({
+		entry: [
+			{
+				changes: [
+					{
+						field: "messages",
+						value: {
+							contacts: [
+								{ profile: { name: "Cliente Recuperado" }, wa_id: testPhone },
+							],
+							messages: [
+								{
+									from: testPhone,
+									id: inboundWamid,
+									text: { body: "Quero recuperar este evento" },
+									timestamp: String(Math.floor(Date.now() / 1000)),
+									type: "text",
+								},
+							],
+							messaging_product: "whatsapp",
+							metadata: {
+								display_phone_number: "5511999999999",
+								phone_number_id: "12345",
+							},
+						},
+					},
+				],
+				id: "entry_recovery_test",
+			},
+		],
+		object: "whatsapp_business_account",
+	});
+
+	await Promise.all([
+		app.inject({
+			headers: {
+				"content-type": "application/json",
+				"x-hub-signature-256": computeSignature(payload),
+			},
+			method: "POST",
+			payload,
+			url: "/webhooks/whatsapp",
+		}),
+		app.inject({
+			headers: {
+				"content-type": "application/json",
+				"x-hub-signature-256": computeSignature(payload),
+			},
+			method: "POST",
+			payload,
+			url: "/webhooks/whatsapp",
+		}),
+	]);
+
+	const [lead] = await db
+		.select()
+		.from(leads)
+		.where(eq(leads.phone, testPhone))
+		.limit(1);
+
+	assert.ok(lead, "o lead deve existir após o reprocessamento");
+	const [conversation] = await db
+		.select()
+		.from(conversations)
+		.where(eq(conversations.leadId, lead.id))
+		.limit(1);
+
+	assert.ok(conversation, "a conversa deve existir após o reprocessamento");
+	await messageDebounceCoordinator.flush(conversation.id);
+
+	assert.equal(
+		sendCount,
+		1,
+		"apenas um envio deve ser produzido após a recuperação do evento falhado"
+	);
+});
+
+test("POST /webhooks/whatsapp - processamento com lease expirado é recuperado e não fica preso em processing", async (t) => {
+	const app = buildApp();
+
+	t.after(() => app.close());
+
+	const testPhone = `55119${Math.floor(
+		10_000_000 + Math.random() * 90_000_000
+	)}`;
+	const staleWamid = `wamid.stale_${Date.now()}_${Math.random()
+		.toString(36)
+		.slice(7)}`;
+
+	const mockedGeminiResponse = {
+		text: JSON.stringify({
+			businessAction: "answer_basic_question",
+			evidenceUsed: [],
+			leadUpdate: { status: "qualifying" },
+			nextAction: "continue_qualification",
+			reply: "Resposta de lease expirado.",
+		}),
+	} as GenerateContentResponse;
+
+	t.mock.method(ai.models, "generateContent", async () => mockedGeminiResponse);
+
+	let sendCount = 0;
+	const originalSendTextMessage = WhatsAppService.prototype.sendTextMessage;
+	WhatsAppService.prototype.sendTextMessage = async (
+		to: string,
+		_text: string
+	) => {
+		sendCount += 1;
+		return {
+			contacts: [{ input: to, wa_id: to }],
+			messages: [
+				{
+					id: `wamid.stale_outbound_${Date.now()}_${Math.random().toString(36).slice(7)}`,
+				},
+			],
+			messaging_product: "whatsapp",
+		};
+	};
+
+	t.after(() => {
+		WhatsAppService.prototype.sendTextMessage = originalSendTextMessage;
+	});
+
+	await db
+		.insert(whatsappWebhookEvents)
+		.values({
+			eventType: "text",
+			externalId: staleWamid,
+			leaseExpiresAt: new Date(Date.now() - 61_000),
+			payload: { content: "Evento abandonado" },
+			phone: testPhone,
+			status: "processing",
+		})
+		.onConflictDoNothing();
+
+	const payload = JSON.stringify({
+		entry: [
+			{
+				changes: [
+					{
+						field: "messages",
+						value: {
+							contacts: [
+								{ profile: { name: "Cliente Stale" }, wa_id: testPhone },
+							],
+							messages: [
+								{
+									from: testPhone,
+									id: staleWamid,
+									text: { body: "Evento abandonado" },
+									timestamp: String(Math.floor(Date.now() / 1000)),
+									type: "text",
+								},
+							],
+							messaging_product: "whatsapp",
+							metadata: {
+								display_phone_number: "5511999999999",
+								phone_number_id: "12345",
+							},
+						},
+					},
+				],
+				id: "entry_stale_recovery_test",
+			},
+		],
+		object: "whatsapp_business_account",
+	});
+
+	const response = await app.inject({
+		headers: {
+			"content-type": "application/json",
+			"x-hub-signature-256": computeSignature(payload),
+		},
+		method: "POST",
+		payload,
+		url: "/webhooks/whatsapp",
+	});
+
+	assert.equal(response.statusCode, 200);
+
+	const [lead] = await db
+		.select()
+		.from(leads)
+		.where(eq(leads.phone, testPhone))
+		.limit(1);
+
+	assert.ok(lead, "o lead deve existir após a recuperação do lease expirado");
+	const [conversation] = await db
+		.select()
+		.from(conversations)
+		.where(eq(conversations.leadId, lead.id))
+		.limit(1);
+
+	assert.ok(
+		conversation,
+		"a conversa deve existir após a recuperação do lease expirado"
+	);
+	await messageDebounceCoordinator.flush(conversation.id);
+
+	assert.equal(
+		sendCount,
+		1,
+		"o processamento com lease expirado deve ser reprocessado exatamente uma vez"
+	);
+
+	const [event] = await db
+		.select()
+		.from(whatsappWebhookEvents)
+		.where(eq(whatsappWebhookEvents.externalId, staleWamid))
+		.limit(1);
+
+	assert.ok(event, "o evento deve permanecer persistido para auditoria");
+	assert.notEqual(event.status, "failed");
 });
 
 test("POST /webhooks/whatsapp - button_reply válido envia confirmação com Confirmar e Não sem passar pelo fluxo conversacional", async (t) => {

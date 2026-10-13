@@ -28,6 +28,8 @@ export const whatsappWebhookEvents = pgTable(
 		}),
 		payload: jsonb().$type<Record<string, unknown>>().notNull().default({}),
 		status: whatsappWebhookEventStatus().notNull().default("processing"),
+		lastError: text(),
+		leaseExpiresAt: timestamp({ withTimezone: true }),
 		createdAt: timestamp({ withTimezone: true }).notNull().defaultNow(),
 		updatedAt: timestamp({ withTimezone: true }).notNull().defaultNow(),
 	},

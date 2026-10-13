@@ -1,11 +1,32 @@
 /** biome-ignore-all lint/performance/noBarrelFile: <> */
-export * from "./appointments";
-export * from "./autonomous-tasks";
-export * from "./consultants";
-export * from "./conversations";
-export * from "./google-calendar-connections";
-export * from "./leads";
-export * from "./messages";
-export * from "./scheduling-sessions";
-export * from "./scheduling-slots";
-export * from "./whatsapp-webhook-events";
+export {
+	appointmentStatus,
+	appointments,
+} from "./appointments";
+export {
+	autonomousTaskStatus,
+	autonomousTasks,
+} from "./autonomous-tasks";
+export { consultants } from "./consultants";
+export {
+	conversationStatus,
+	conversations,
+} from "./conversations";
+export { googleCalendarConnections } from "./google-calendar-connections";
+export {
+	leadCommercialApproach,
+	leadSource,
+	leadStatus,
+	leads,
+	leadUrgency,
+} from "./leads";
+export { messageRole, messages } from "./messages";
+export {
+	schedulingSessionStatus,
+	schedulingSessions,
+} from "./scheduling-sessions";
+export { schedulingSlots } from "./scheduling-slots";
+export {
+	whatsappWebhookEventStatus,
+	whatsappWebhookEvents,
+} from "./whatsapp-webhook-events";

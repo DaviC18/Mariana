@@ -4,9 +4,8 @@
 /** biome-ignore-all lint/suspicious/useAwait: <> */
 /** biome-ignore-all assist/source/useSortedKeys: <> */
 
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import type { FastifyPluginCallbackZod } from "fastify-type-provider-zod";
-import z from "zod";
 import { db } from "../../db/connections";
 import {
 	conversations,
@@ -34,6 +33,8 @@ const schedulingConfirmationOrchestrator =
 	new SchedulingConfirmationOrchestrator();
 
 const schedulingCancellationService = new SchedulingCancellationService();
+
+const WHATSAPP_WEBHOOK_EVENT_LEASE_MS = 60_000;
 
 async function sendCompliantText({
 	conversationId,
@@ -67,6 +68,25 @@ async function sendCompliantButtons({
 	return await whatsAppService.sendReplyButtonsMessage(to, body, buttons);
 }
 
+async function recoverStaleProcessingWebhookEvents() {
+	const now = new Date();
+
+	await db
+		.update(whatsappWebhookEvents)
+		.set({
+			lastError: "processing lease expired",
+			leaseExpiresAt: null,
+			status: "failed",
+			updatedAt: now,
+		})
+		.where(
+			and(
+				eq(whatsappWebhookEvents.status, "processing"),
+				sql`${whatsappWebhookEvents.leaseExpiresAt} IS NOT NULL AND ${whatsappWebhookEvents.leaseExpiresAt} <= ${now.toISOString()}`
+			)
+		);
+}
+
 async function claimWhatsAppWebhookEvent({
 	externalId,
 	phone,
@@ -78,11 +98,17 @@ async function claimWhatsAppWebhookEvent({
 	eventType: "button_reply" | "text";
 	payload: Record<string, unknown>;
 }) {
+	const now = new Date();
+	const leaseExpiresAt = new Date(
+		now.getTime() + WHATSAPP_WEBHOOK_EVENT_LEASE_MS
+	);
+
 	const [insertedEvent] = await db
 		.insert(whatsappWebhookEvents)
 		.values({
 			eventType,
 			externalId,
+			leaseExpiresAt,
 			payload,
 			phone,
 			status: "processing",
@@ -109,52 +135,146 @@ async function claimWhatsAppWebhookEvent({
 		};
 	}
 
-	if (
-		existingEvent.status === "processing" ||
-		existingEvent.status === "processed"
-	) {
+	if (existingEvent.status === "processed") {
 		return {
 			duplicate: true,
 			event: existingEvent,
 		};
 	}
 
-	const [reclaimedEvent] = await db
-		.update(whatsappWebhookEvents)
-		.set({
-			payload,
-			phone,
-			status: "processing",
-			updatedAt: new Date(),
-		})
-		.where(eq(whatsappWebhookEvents.id, existingEvent.id))
-		.returning();
+	if (existingEvent.status === "failed") {
+		const [reclaimedEvent] = await db
+			.update(whatsappWebhookEvents)
+			.set({
+				lastError: null,
+				leaseExpiresAt,
+				payload,
+				phone,
+				status: "processing",
+				updatedAt: now,
+			})
+			.where(
+				and(
+					eq(whatsappWebhookEvents.externalId, externalId),
+					eq(whatsappWebhookEvents.status, "failed")
+				)
+			)
+			.returning();
+
+		if (reclaimedEvent) {
+			return {
+				duplicate: false,
+				event: reclaimedEvent,
+			};
+		}
+	}
+
+	if (existingEvent.status === "processing") {
+		if (!existingEvent.leaseExpiresAt || existingEvent.leaseExpiresAt > now) {
+			return {
+				duplicate: true,
+				event: existingEvent,
+			};
+		}
+
+		const [reclaimedEvent] = await db
+			.update(whatsappWebhookEvents)
+			.set({
+				lastError: null,
+				leaseExpiresAt,
+				payload,
+				phone,
+				status: "processing",
+				updatedAt: now,
+			})
+			.where(
+				and(
+					eq(whatsappWebhookEvents.externalId, externalId),
+					eq(whatsappWebhookEvents.status, "processing"),
+					sql`${whatsappWebhookEvents.leaseExpiresAt} IS NOT NULL AND ${whatsappWebhookEvents.leaseExpiresAt} <= ${now.toISOString()}`
+				)
+			)
+			.returning();
+
+		if (reclaimedEvent) {
+			return {
+				duplicate: false,
+				event: reclaimedEvent,
+			};
+		}
+	}
 
 	return {
-		duplicate: false,
-		event: reclaimedEvent,
+		duplicate: true,
+		event: existingEvent,
 	};
 }
 
-async function markWhatsAppWebhookEventProcessed(id: string) {
+async function markWhatsAppWebhookEventProcessed(
+	event: typeof whatsappWebhookEvents.$inferSelect
+) {
+	if (!event.leaseExpiresAt) {
+		return;
+	}
+
 	await db
 		.update(whatsappWebhookEvents)
 		.set({
+			lastError: null,
+			leaseExpiresAt: null,
 			status: "processed",
 			updatedAt: new Date(),
 		})
-		.where(eq(whatsappWebhookEvents.id, id));
+		.where(
+			and(
+				eq(whatsappWebhookEvents.id, event.id),
+				eq(whatsappWebhookEvents.status, "processing"),
+				eq(whatsappWebhookEvents.leaseExpiresAt, event.leaseExpiresAt)
+			)
+		);
 }
 
-async function markWhatsAppWebhookEventFailed(id: string, reason: string) {
+async function markWhatsAppWebhookEventFailed(
+	event: typeof whatsappWebhookEvents.$inferSelect,
+	reason: string
+) {
+	if (!event.leaseExpiresAt) {
+		return;
+	}
+
+	const [existingEvent] = await db
+		.select()
+		.from(whatsappWebhookEvents)
+		.where(
+			and(
+				eq(whatsappWebhookEvents.id, event.id),
+				eq(whatsappWebhookEvents.status, "processing"),
+				eq(whatsappWebhookEvents.leaseExpiresAt, event.leaseExpiresAt)
+			)
+		)
+		.limit(1);
+
+	const nextPayload =
+		typeof existingEvent?.payload === "object" && existingEvent?.payload
+			? { ...(existingEvent.payload as Record<string, unknown>), error: reason }
+			: { error: reason };
+
 	await db
 		.update(whatsappWebhookEvents)
 		.set({
-			payload: { error: reason },
+			lastError: reason,
+			leaseExpiresAt: null,
+			payload: nextPayload,
 			status: "failed",
 			updatedAt: new Date(),
 		})
-		.where(eq(whatsappWebhookEvents.id, id));
+		.where(
+			and(
+				eq(whatsappWebhookEvents.id, event.id),
+				eq(whatsappWebhookEvents.status, "processing"),
+				eq(whatsappWebhookEvents.leaseExpiresAt, event.leaseExpiresAt)
+			)
+		);
 }
 
 export const webhookWhatsApp: FastifyPluginCallbackZod = (app, _opts, done) => {
@@ -174,45 +294,36 @@ export const webhookWhatsApp: FastifyPluginCallbackZod = (app, _opts, done) => {
 		}
 	);
 
-	app.get(
-		"/webhooks/whatsapp",
-		{
-			schema: {
-				querystring: z.object({
-					"hub.challenge": z.string().optional(),
-					"hub.mode": z.string().optional(),
-					"hub.verify_token": z.string().optional(),
-				}),
-			},
-		},
-		async (request, reply) => {
-			const mode = request.query["hub.mode"];
-			const token = request.query["hub.verify_token"];
-			const challenge = request.query["hub.challenge"];
+	app.get("/webhooks/whatsapp", async (request, reply) => {
+		const query = request.query as Record<string, string | undefined>;
+		const mode = query["hub.mode"];
+		const token = query["hub.verify_token"];
+		const challenge = query["hub.challenge"];
 
-			if (mode === "subscribe" && token === env.WHATSAPP_VERIFY_TOKEN) {
-				request.log.info({
-					event: "whatsapp_webhook_verified",
-				});
-
-				return reply
-					.code(200)
-					.type("text/plain")
-					.send(challenge ?? "");
-			}
-
-			request.log.warn({
-				event: "whatsapp_webhook_verification_failed",
-				token,
+		if (mode === "subscribe" && token === env.WHATSAPP_VERIFY_TOKEN) {
+			request.log.info({
+				event: "whatsapp_webhook_verified",
 			});
 
-			return reply.code(403).send({
-				error: "Forbidden",
-			});
+			return reply
+				.code(200)
+				.type("text/plain")
+				.send(challenge ?? "");
 		}
-	);
+
+		request.log.warn({
+			event: "whatsapp_webhook_verification_failed",
+			token,
+		});
+
+		return reply.code(403).send({
+			error: "Forbidden",
+		});
+	});
 
 	app.post("/webhooks/whatsapp", async (request, reply) => {
+		await recoverStaleProcessingWebhookEvents();
+
 		const signatureHeader = request.headers["x-hub-signature-256"] as
 			| string
 			| undefined;
@@ -378,9 +489,7 @@ export const webhookWhatsApp: FastifyPluginCallbackZod = (app, _opts, done) => {
 									});
 
 									if (eventReceipt.event?.id) {
-										await markWhatsAppWebhookEventProcessed(
-											eventReceipt.event.id
-										);
+										await markWhatsAppWebhookEventProcessed(eventReceipt.event);
 									}
 
 									continue;
@@ -427,9 +536,7 @@ export const webhookWhatsApp: FastifyPluginCallbackZod = (app, _opts, done) => {
 								}
 
 								if (eventReceipt.event?.id) {
-									await markWhatsAppWebhookEventProcessed(
-										eventReceipt.event.id
-									);
+									await markWhatsAppWebhookEventProcessed(eventReceipt.event);
 								}
 
 								continue;
@@ -466,9 +573,7 @@ export const webhookWhatsApp: FastifyPluginCallbackZod = (app, _opts, done) => {
 									});
 
 									if (eventReceipt.event?.id) {
-										await markWhatsAppWebhookEventProcessed(
-											eventReceipt.event.id
-										);
+										await markWhatsAppWebhookEventProcessed(eventReceipt.event);
 									}
 
 									continue;
@@ -515,9 +620,7 @@ export const webhookWhatsApp: FastifyPluginCallbackZod = (app, _opts, done) => {
 									}
 
 									if (eventReceipt.event?.id) {
-										await markWhatsAppWebhookEventProcessed(
-											eventReceipt.event.id
-										);
+										await markWhatsAppWebhookEventProcessed(eventReceipt.event);
 									}
 
 									continue;
@@ -560,9 +663,7 @@ export const webhookWhatsApp: FastifyPluginCallbackZod = (app, _opts, done) => {
 								}
 
 								if (eventReceipt.event?.id) {
-									await markWhatsAppWebhookEventProcessed(
-										eventReceipt.event.id
-									);
+									await markWhatsAppWebhookEventProcessed(eventReceipt.event);
 								}
 
 								continue;
@@ -585,9 +686,7 @@ export const webhookWhatsApp: FastifyPluginCallbackZod = (app, _opts, done) => {
 								});
 
 								if (eventReceipt.event?.id) {
-									await markWhatsAppWebhookEventProcessed(
-										eventReceipt.event.id
-									);
+									await markWhatsAppWebhookEventProcessed(eventReceipt.event);
 								}
 
 								continue;
@@ -634,14 +733,14 @@ export const webhookWhatsApp: FastifyPluginCallbackZod = (app, _opts, done) => {
 							}
 
 							if (eventReceipt.event?.id) {
-								await markWhatsAppWebhookEventProcessed(eventReceipt.event.id);
+								await markWhatsAppWebhookEventProcessed(eventReceipt.event);
 							}
 
 							continue;
 						} catch (err) {
 							if (eventReceipt.event?.id) {
 								await markWhatsAppWebhookEventFailed(
-									eventReceipt.event.id,
+									eventReceipt.event,
 									err instanceof Error ? err.message : String(err)
 								);
 							}
@@ -716,17 +815,17 @@ export const webhookWhatsApp: FastifyPluginCallbackZod = (app, _opts, done) => {
 										"[WhatsAppWebhook] Failed to send Mariana reply to WhatsApp:",
 										err
 									);
+								} finally {
+									if (eventReceipt.event) {
+										await markWhatsAppWebhookEventProcessed(eventReceipt.event);
+									}
 								}
 							},
 						});
-
-						if (eventReceipt.event?.id) {
-							await markWhatsAppWebhookEventProcessed(eventReceipt.event.id);
-						}
 					} catch (err) {
 						if (eventReceipt.event?.id) {
 							await markWhatsAppWebhookEventFailed(
-								eventReceipt.event.id,
+								eventReceipt.event,
 								err instanceof Error ? err.message : String(err)
 							);
 						}
