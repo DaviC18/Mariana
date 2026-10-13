@@ -16,13 +16,13 @@ const parseIntegerEnv = (value: string | undefined, fallback: number) => {
 	return parsed;
 };
 
-const envSchema = z.object({
+export const envSchema = z.object({
 	DATABASE_URL: z
 		.string()
 		.min(1)
 		.url()
 		.refine((v) => v.startsWith("postgresql://"), {
-			message: "DATABSE_URL It should start with postgresql://",
+			message: "DATABASE_URL should start with postgresql://",
 		}),
 	GEMINI_API_KEY: z.string().min(1),
 	GOOGLE_ACCOUNT_EMAIL: z.string().email().min(1),
@@ -31,7 +31,6 @@ const envSchema = z.object({
 	GOOGLE_CLIENT_SECRET: z.string().min(1),
 	GOOGLE_REDIRECT_URI: z.string().min(1),
 	MESSAGE_DEBOUNCE_MS: z.coerce.number().int().positive().default(15_000),
-	// META_ADS_ACCESS_TOKEN: z.string().min(1),
 	META_ADS_APP_SECRET: z.string().min(1),
 	META_ADS_GRAPH_API_VERSION: z.string().min(1),
 	META_ADS_VERIFY_TOKEN: z.string().min(1),
@@ -53,29 +52,50 @@ const envSchema = z.object({
 	WHATSAPP_WABA_ID: z.string().min(1),
 });
 
-export const env = envSchema.parse({
-	DATABASE_URL: process.env.DATABASE_URL,
-	GEMINI_API_KEY: process.env.GEMINI_API_KEY,
-	GOOGLE_ACCOUNT_EMAIL: process.env.GOOGLE_ACCOUNT_EMAIL,
-	GOOGLE_ADS_WEBHOOK_KEY: process.env.GOOGLE_ADS_WEBHOOK_KEY,
-	GOOGLE_CLIENT_ID: process.env.GOOGLE_CLIENT_ID,
-	GOOGLE_CLIENT_SECRET: process.env.GOOGLE_CLIENT_SECRET,
-	GOOGLE_REDIRECT_URI: process.env.GOOGLE_REDIRECT_URI,
-	MESSAGE_DEBOUNCE_MS: parseIntegerEnv(process.env.MESSAGE_DEBOUNCE_MS, 15_000),
-	// META_ADS_ACCESS_TOKEN: process.env.META_ADS_ACCESS_TOKEN,
-	META_ADS_APP_SECRET: process.env.META_ADS_APP_SECRET,
-	META_ADS_GRAPH_API_VERSION: process.env.META_ADS_GRAPH_API_VERSION,
-	META_ADS_VERIFY_TOKEN: process.env.META_ADS_VERIFY_TOKEN,
-	NODE_ENV: process.env.NODE_ENV,
-	PORT: parseIntegerEnv(process.env.PORT, 3252),
-	SCHEDULE_CONFIRMATION_MINUTES: parseIntegerEnv(
-		process.env.SCHEDULE_CONFIRMATION_MINUTES,
-		60
-	),
-	WHATSAPP_ACCESS_TOKEN: process.env.WHATSAPP_ACCESS_TOKEN,
-	WHATSAPP_APP_SECRET: process.env.WHATSAPP_APP_SECRET,
-	WHATSAPP_GRAPH_API_VERSION: process.env.WHATSAPP_GRAPH_API_VERSION,
-	WHATSAPP_PHONE_NUMBER_ID: process.env.WHATSAPP_PHONE_NUMBER_ID,
-	WHATSAPP_VERIFY_TOKEN: process.env.WHATSAPP_VERIFY_TOKEN,
-	WHATSAPP_WABA_ID: process.env.WHATSAPP_WABA_ID,
-});
+export type Env = z.infer<typeof envSchema>;
+
+export function buildEnvInput(source: NodeJS.ProcessEnv) {
+	return {
+		DATABASE_URL: source.DATABASE_URL,
+		GEMINI_API_KEY: source.GEMINI_API_KEY,
+		GOOGLE_ACCOUNT_EMAIL: source.GOOGLE_ACCOUNT_EMAIL,
+		GOOGLE_ADS_WEBHOOK_KEY: source.GOOGLE_ADS_WEBHOOK_KEY,
+		GOOGLE_CLIENT_ID: source.GOOGLE_CLIENT_ID,
+		GOOGLE_CLIENT_SECRET: source.GOOGLE_CLIENT_SECRET,
+		GOOGLE_REDIRECT_URI: source.GOOGLE_REDIRECT_URI,
+		MESSAGE_DEBOUNCE_MS: parseIntegerEnv(source.MESSAGE_DEBOUNCE_MS, 15_000),
+		META_ADS_APP_SECRET: source.META_ADS_APP_SECRET,
+		META_ADS_GRAPH_API_VERSION: source.META_ADS_GRAPH_API_VERSION,
+		META_ADS_VERIFY_TOKEN: source.META_ADS_VERIFY_TOKEN,
+		NODE_ENV: source.NODE_ENV,
+		PORT: parseIntegerEnv(source.PORT, 3252),
+		SCHEDULE_CONFIRMATION_MINUTES: parseIntegerEnv(
+			source.SCHEDULE_CONFIRMATION_MINUTES,
+			60
+		),
+		WHATSAPP_ACCESS_TOKEN: source.WHATSAPP_ACCESS_TOKEN,
+		WHATSAPP_APP_SECRET: source.WHATSAPP_APP_SECRET,
+		WHATSAPP_GRAPH_API_VERSION: source.WHATSAPP_GRAPH_API_VERSION,
+		WHATSAPP_PHONE_NUMBER_ID: source.WHATSAPP_PHONE_NUMBER_ID,
+		WHATSAPP_VERIFY_TOKEN: source.WHATSAPP_VERIFY_TOKEN,
+		WHATSAPP_WABA_ID: source.WHATSAPP_WABA_ID,
+	};
+}
+
+export function parseEnv(source: NodeJS.ProcessEnv): Env {
+	const result = envSchema.safeParse(buildEnvInput(source));
+
+	if (!result.success) {
+		const issues = result.error.issues
+			.map(
+				(issue) => `  - ${issue.path.join(".") || "(root)"}: ${issue.message}`
+			)
+			.join("\n");
+
+		throw new Error(`Invalid environment configuration:\n${issues}`);
+	}
+
+	return result.data;
+}
+
+export const env = parseEnv(process.env);

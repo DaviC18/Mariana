@@ -24,11 +24,7 @@ import {
 import type { LeadStatus } from "../leads/lead-status";
 import { updateLeadFromAgent } from "../leads/update-lead-from-agent";
 
-type PersistLeadTransactionValues = Partial<
-	InferInsertModel<typeof leads> & {
-		urgency?: string | null;
-	}
-> & {
+type PersistLeadTransactionValues = Partial<InferInsertModel<typeof leads>> & {
 	updatedAt: Date;
 };
 
@@ -257,7 +253,7 @@ export async function generateMarianaResponse({
 		objective: lead.objective ?? "",
 		painPoint: lead.painPoint,
 		status: lead.status,
-		urgency: null,
+		urgency: lead.urgency,
 	};
 
 	// 6. Converte histórico

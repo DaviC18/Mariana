@@ -40,5 +40,8 @@ export const whatsappWebhookEvents = pgTable(
 		statusCreatedAtIdx: index(
 			"whatsapp_webhook_events_status_created_at_idx"
 		).on(table.status, table.createdAt),
+		statusLeaseExpiresAtIdx: index(
+			"whatsapp_webhook_events_status_lease_expires_at_idx"
+		).on(table.status, table.leaseExpiresAt),
 	})
 );

@@ -65,6 +65,7 @@ export const leads = pgTable(
 		sourceLeadId: text(),
 		status: leadStatus().notNull().default("new"),
 		updatedAt: timestamp({ withTimezone: true }).notNull().defaultNow(),
+		urgency: leadUrgency(),
 	},
 	(table) => ({
 		phoneIdx: index("leads_phone_idx").on(table.phone),
