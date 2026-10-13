@@ -14,1578 +14,766 @@
 </p>
 
 <p>
-  <a href="https://github.com/DaviC18/Mariana">Repository</a> ·
-  <a href="https://github.com/DaviC18/Mariana/tree/develop">Develop</a> ·
+  <a href="https://github.com/DaviC18/Mariana">Repositório</a> ·
+  <a href="https://github.com/DaviC18/Mariana/tree/develop">Branch develop</a> ·
   <a href="https://www.linkedin.com/in/david-curty-84b2a0285/">Davi Curty</a>
 </p>
 
-</div>
+Mariana é um agente de atendimento comercial **backend-first**, desenvolvido para uma empresa de consórcio. O sistema recebe leads pelo WhatsApp, conduz uma qualificação comercial estruturada com apoio de IA, consulta a disponibilidade dos consultores no Google Calendar e permite que o interessado escolha e confirme um horário de atendimento.
 
-Mariana é um agente backend-first de atendimento comercial via WhatsApp
-para uma empresa de consórcio. O sistema automatiza o pré-atendimento de
-leads provenientes de campanhas de Google Ads e Meta Ads, conduz uma
-qualificação estruturada, consulta a disponibilidade de consultores no
-Google Calendar e conduz o agendamento de uma reunião humana quando há
-interesse e confirmação explícita.
+O projeto também possui integrações para receber leads de campanhas de Google Ads e Meta Ads.
 
-> **Estado documentado:** 24/09/2026\
-> **Branch de referência:** `develop`\
-> **Repositório:** `github.com/DaviC18/Mariana`
+> **Estado deste documento:** 13/10/2026  
+> **Branch de referência:** `develop`  
+> **Repositório:** [DaviC18/Mariana](https://github.com/DaviC18/Mariana)
 
-O projeto está sendo construído inicialmente **sem frontend**. O foco
-atual é o backend responsável pelo fluxo de atendimento, qualificação,
-disponibilidade e agendamento via WhatsApp.
+O foco atual é consolidar o backend, especialmente a confiabilidade do webhook, a idempotência, o processamento recuperável de mensagens e o envio confiável das respostas. Não há frontend como parte do escopo atual.
 
-------------------------------------------------------------------------
+---
+
+## Sumário
+
+- [Visão geral](#visão-geral)
+- [Funcionalidades implementadas](#funcionalidades-implementadas)
+- [Arquitetura](#arquitetura)
+- [Fluxo de atendimento](#fluxo-de-atendimento)
+- [Fluxo de agendamento](#fluxo-de-agendamento)
+- [Persistência e idempotência](#persistência-e-idempotência)
+- [Tecnologias](#tecnologias)
+- [Estrutura do projeto](#estrutura-do-projeto)
+- [Instalação e execução](#instalação-e-execução)
+- [Variáveis de ambiente](#variáveis-de-ambiente)
+- [Banco de dados e migrations](#banco-de-dados-e-migrations)
+- [Segurança e regras comerciais](#segurança-e-regras-comerciais)
+- [Testes e validação](#testes-e-validação)
+- [Estado atual e pendências](#estado-atual-e-pendências)
+- [Roadmap](#roadmap)
+- [Licença](#licença)
+
+---
 
 ## Visão geral
 
 O fluxo comercial de alto nível é:
 
-``` text
-Lead
-  │
-  │ Google Ads / Meta Ads
-  ▼
-WhatsApp
-  │
-  ▼
-Webhook
-  │
-  ▼
-Fastify
-  │
-  ▼
-Mariana / Gemini
-  │
-  ├── Qualificação
-  │
-  └── Interesse em falar com consultor
-             │
-             ▼
-     Google Calendar
-             │
-             ▼
-      Oferta de horários
-             │
-             ▼
-      Escolha estruturada
-             │
-             ▼
-    Confirmação explícita
-             │
-             ▼
-      AppointmentService
-        │           │
-        ▼           ▼
- Google Calendar  PostgreSQL
+```text
+Google Ads / Meta Ads
+          │
+          ▼
+     Entrada de leads
+          │
+          ▼
+       WhatsApp
+          │
+          ▼
+   Webhook Fastify
+          │
+          ├── Validação de assinatura
+          ├── Identificação do evento
+          └── Deduplicação por WAMID
+          │
+          ▼
+    Lead / Conversation
+          │
+          ▼
+  Persistência da mensagem
+          │
+          ▼
+   Mariana / Gemini
+          │
+          ├── Conversação
+          ├── Qualificação comercial
+          └── Identificação de interesse
+                     │
+                     ▼
+             Disponibilidade real
+              Google Calendar
+                     │
+                     ▼
+              Oferta de horários
+                     │
+                     ▼
+            Botões interativos
+                     │
+                     ▼
+             Seleção do horário
+                     │
+                     ▼
+           Confirmação explícita
+                     │
+                     ▼
+            AppointmentService
+                 │        │
+                 ▼        ▼
+         Google Calendar PostgreSQL
 ```
 
-O objetivo é que somente leads qualificados e interessados em falar com
-um consultor avancem para o agendamento.
+A IA é responsável pela conversa e pela qualificação. A lógica de seleção, confirmação, validação de horários e criação de appointments pertence ao backend determinístico.
 
-### Regras comerciais
+## Funcionalidades implementadas
 
-Mariana pode:
+### Atendimento e mensageria
 
--   explicar consórcio de forma geral;
--   qualificar o lead;
--   identificar interesse em falar com um consultor;
--   consultar disponibilidade real;
--   conduzir o processo de agendamento.
+- Recebimento de mensagens pelo webhook da WhatsApp Cloud API.
+- Validação da assinatura do webhook usando HMAC SHA-256.
+- Identificação e ingestão de leads pelo telefone.
+- Criação ou reutilização de conversas ativas.
+- Persistência de mensagens de usuário e do assistente.
+- Recebimento de mensagens de texto e respostas interativas `button_reply`.
+- Envio de mensagens de texto e botões interativos de resposta.
+- Persistência de WAMIDs em mensagens outbound quando o envio retorna o identificador.
+- Registro de eventos inbound de WhatsApp em `whatsapp_webhook_events`.
+- Deduplicação de eventos por identificador externo, normalmente o WAMID.
 
-Mariana não deve:
-
--   recomendar grupo ou carta específica;
--   informar porcentagem de lance como estratégia personalizada;
--   fornecer estratégia personalizada de consórcio;
--   garantir contemplação ou prazo;
--   inventar horários, consultores, disponibilidade, IDs ou resultados
-    de agendamento.
-
-A disponibilidade deve ser determinada pelo backend e pelo Google
-Calendar. O agendamento só deve ser criado após a qualificação e a
-confirmação explícita do usuário.
-
-A conversa deve permanecer objetiva, com uma pergunta principal por
-mensagem, sem pressionar o lead a marcar uma reunião prematuramente.
-
-------------------------------------------------------------------------
-
-## Principais funcionalidades
-
-### Atendimento via WhatsApp
-
--   Recebimento de mensagens por webhook.
--   Validação de assinatura HMAC SHA-256.
--   Identificação do lead pelo telefone.
--   Criação ou reutilização de uma conversa ativa.
--   Persistência das mensagens inbound.
--   Deduplicação lógica por `externalId`, principalmente WAMID.
--   Envio de mensagens de texto.
--   Persistência do WAMID das mensagens outbound.
+**Limitação importante:** registrar um evento e impedir duplicatas não equivale, por si só, a garantir processamento recuperável. A recuperação automática de eventos interrompidos e o reenvio durável de respostas ainda precisam ser consolidados.
 
 ### Qualificação comercial
 
-O lead passa pelos estados:
+O fluxo comercial utiliza os estados:
 
-``` text
+```text
 new → qualifying → qualified → scheduled
 ```
 
-A qualificação considera:
+A qualificação considera informações como:
 
--   data de nascimento válida para maioridade;
--   objetivo;
--   tipo de consórcio;
--   situação atual;
--   dor ou motivação;
--   interesse explícito em falar com consultor.
+- Data de nascimento e maioridade.
+- Objetivo do cliente.
+- Tipo de consórcio.
+- Situação atual.
+- Dor ou motivação.
+- Interesse explícito em conversar com um consultor.
 
-A promoção para `scheduled` depende da existência de um appointment
-confirmado.
+A promoção do lead para `scheduled` depende do fluxo de agendamento confirmado.
 
 ### Inteligência artificial
 
-O Gemini é utilizado como camada conversacional para:
+O Gemini é utilizado para:
 
--   processamento de texto livre;
--   diálogo;
--   qualificação;
--   definição da próxima ação conversacional.
+- Compreensão de texto livre.
+- Condução do diálogo.
+- Qualificação do lead.
+- Definição da próxima ação conversacional.
+- Geração de respostas contextuais.
 
-A IA não é responsável por:
-
--   escolher horários;
--   escolher consultores;
--   inventar disponibilidade;
--   resolver IDs de botões;
--   criar diretamente appointments.
-
-Essas operações pertencem a serviços determinísticos do backend.
+A IA não deve escolher horários, inventar disponibilidade, decidir qual consultor atende, interpretar diretamente IDs de botões ou criar appointments sem passar pelas validações determinísticas do backend.
 
 ### Disponibilidade
 
-O sistema consulta a disponibilidade dos consultores utilizando o Google
-Calendar.
+O sistema consulta calendários dos consultores para verificar horários livres.
 
-As regras atuais documentadas são:
+As regras do domínio implementadas/documentadas incluem:
 
--   horário comercial entre `08:00` e `18:00`;
--   dias úteis;
--   slots de 30 minutos;
--   verificação de sobreposição e conflitos;
--   no máximo três horários apresentados por oferta;
--   horários formatados em `America/Sao_Paulo`.
+- Horário comercial entre `08:00` e `18:00`.
+- Dias úteis.
+- Slots de 30 minutos.
+- Verificação de sobreposição e conflitos.
+- Oferta de no máximo três horários por vez.
+- Formatação de horários para `America/Sao_Paulo`.
 
-### Scheduling Session
+A disponibilidade final precisa ser verificada novamente durante a confirmação, pois pode mudar depois da oferta inicial.
 
-A oferta de horários é persistida em uma sessão de agendamento.
-
-Uma `scheduling_session` possui:
-
--   UUID;
--   `leadId`;
--   `conversationId`;
--   `status`;
--   `createdAt`;
--   `expiresAt`;
--   `updatedAt`.
-
-Os estados documentados são:
-
-``` text
-active
-closed
-expired
-```
-
-Existe uma restrição para permitir apenas uma sessão `active` por lead.
-
-### Scheduling Slots
-
-Cada horário ofertado é persistido como um `scheduling_slot`.
-
-Os dados documentados incluem:
-
--   UUID;
--   referência à sessão;
--   `position`;
--   `consultantId`;
--   `consultantName`;
--   `calendarId`;
--   `startAt`;
--   `endAt`;
--   `createdAt`.
-
-Existem constraints para:
-
--   unicidade de `(schedulingSessionId, position)`;
--   `position > 0`;
--   `startAt < endAt`.
-
-### Agendamento
-
-O `AppointmentService` atua como última barreira de validação antes da
-criação do evento.
-
-O serviço:
-
-1.  valida data/hora;
-2.  valida consultor;
-3.  valida o lead qualificado;
-4.  verifica conflitos no PostgreSQL;
-5.  reconsulta a disponibilidade no Google Calendar;
-6.  cria o evento no Google Calendar;
-7.  persiste o appointment;
-8.  promove o lead para `scheduled`;
-9.  fecha a sessão.
-
-### Seleção de horários por botões
-
-A evolução definida para a Etapa 10 substitui a seleção textual de
-horários, como `1/2/3`, por botões interativos do WhatsApp.
-
-Quando existem dois ou três horários:
-
-``` text
-Tenho estes horários disponíveis:
-
-[25/09 às 10:00]
-[25/09 às 14:00]
-[26/09 às 09:30]
-```
-
-Após o clique:
-
-``` text
-Você escolheu 25/09 às 14:00.
-
-Posso confirmar esse horário para você?
-
-[Confirmar] [Não]
-```
-
-Quando existe apenas um horário, não há etapa de escolha:
-
-``` text
-Temos apenas um horário disponível:
-
-25/09 às 10:00
-
-Posso confirmar esse horário para você?
-
-[Confirmar] [Não]
-```
-
-**Importante:** a implementação dos botões, da seleção, da confirmação e
-do fluxo interativo completo ainda está planejada no estado documentado.
-
-------------------------------------------------------------------------
+---
 
 ## Arquitetura
 
-A aplicação segue uma arquitetura modular em TypeScript.
+O projeto utiliza TypeScript e Fastify, com separação entre rotas, integrações externas, serviços de domínio e persistência.
 
 ### Camadas principais
 
-  -----------------------------------------------------------------------
-  Camada                              Responsabilidade
-  ----------------------------------- -----------------------------------
-  Webhook                             HTTP, assinatura, parsing do
-                                      payload e roteamento por tipo de
-                                      mensagem
-
-  WhatsApp Integration                Conversão entre o modelo interno e
-                                      os payloads da WhatsApp Cloud API
-
-  Conversação                         Recepção, persistência e
-                                      processamento das mensagens
-
-  Gemini                              Texto livre, diálogo e qualificação
-
-  SchedulingAvailabilityService       Consulta e validação da
-                                      disponibilidade
-
-  SchedulingOfferService              Persistência da sessão e dos
-                                      horários ofertados
-
-  SchedulingChoiceService             Resolução e validação da escolha
-                                      estruturada
-
-  AppointmentService                  Validação final e criação do
-                                      appointment/evento
-
-  PostgreSQL / Drizzle                Persistência relacional,
-                                      constraints e transações
-
-  Google Calendar                     FreeBusy, criação de eventos e
-                                      exclusão compensatória
-  -----------------------------------------------------------------------
+| Camada | Responsabilidade |
+|---|---|
+| Webhook WhatsApp | HTTP, assinatura, parsing, deduplicação e roteamento das mensagens |
+| Integração WhatsApp | Envio de textos e botões pela Cloud API |
+| Leads | Ingestão, persistência e atualização de dados comerciais |
+| Conversas | Persistência de mensagens e coordenação do atendimento |
+| Gemini | Conversação e qualificação assistida por IA |
+| Disponibilidade | Consulta de horários e conflitos |
+| Scheduling | Oferta, seleção, cancelamento e confirmação |
+| Appointment | Validação final e criação do agendamento |
+| PostgreSQL / Drizzle | Persistência, constraints, queries e migrations |
+| Google Calendar | Consulta de disponibilidade e criação de eventos |
 
 ### Separação de responsabilidades
 
-O webhook não deve conter regras comerciais complexas.
+- O webhook não deve concentrar regras comerciais complexas.
+- A integração do WhatsApp não decide se um horário é válido.
+- O Gemini não deve ser a autoridade sobre IDs de slots ou estado de agendamento.
+- O serviço de oferta persiste os horários que foram apresentados ao usuário.
+- O serviço de escolha valida a seleção contra dados persistidos.
+- O `AppointmentService` é a última barreira de validação antes da criação do agendamento.
 
-A integração do WhatsApp não deve decidir qual horário é válido.
+---
 
-O Gemini não deve interpretar IDs de botões.
+## Fluxo de atendimento
 
-O `SchedulingOfferService` não deve criar eventos no Google Calendar.
+### Mensagens de texto
 
-O `SchedulingChoiceService` não deve chamar Gemini, recalcular
-disponibilidade ou criar appointments.
-
-O `AppointmentService` não deve interpretar diretamente o payload bruto
-do WhatsApp.
-
-------------------------------------------------------------------------
-
-## Fluxo de mensagens atual
-
-O fluxo atualmente documentado para mensagens de texto é:
-
-``` text
+```text
 WhatsApp
    │
    ▼
 webhook-whatsapp
    │
-   ├── valida HMAC
-   ├── faz parsing
-   └── aceita type=text no estado atual
-   │
-   ▼
-find/create lead
-   │
-   ▼
-find/create active conversation
-   │
-   ▼
+   ├── valida assinatura
+   ├── identifica WAMID
+   ├── tenta registrar/reivindicar evento
+   └── identifica lead e conversa
+           │
+           ▼
 receiveCustomerMessage
-   │
-   ├── grava messages(user)
-   └── debounce para role=user
-   │
-   ▼
-generateMarianaResponse
-   │
-   ▼
-Gemini
-   │
-   ▼
-próxima ação / resposta
-   │
-   ▼
-sendTextMessage
-   │
-   ▼
-salva WAMID outbound
+           │
+           ├── persiste a mensagem
+           ├── atualiza a conversa
+           └── agenda processamento por debounce
+                        │
+                        ▼
+             generateMarianaResponse
+                        │
+                        ▼
+                      Gemini
+                        │
+                        ▼
+                Resposta / ação
+                        │
+                        ▼
+                 WhatsApp Cloud API
 ```
 
-Esse fluxo não deve ser reutilizado diretamente para
-`interactive.button_reply`, porque uma resposta de botão representa uma
-decisão estruturada e não precisa passar pelo debounce ou pelo Gemini.
+O processamento conversacional usa debounce para agrupar mensagens próximas antes de gerar uma resposta.
 
-------------------------------------------------------------------------
+**Ponto de atenção:** o debounce atual é coordenado em memória. Para garantir recuperação após encerramento inesperado do processo, o ciclo de processamento precisa ser integrado a um mecanismo durável de tarefas e retomada.
+
+### Respostas de botões
+
+As respostas `interactive.button_reply` seguem um caminho determinístico separado do fluxo de texto. Elas não devem ser encaminhadas automaticamente ao Gemini nem depender do debounce para executar seleção, confirmação ou cancelamento.
+
+Os identificadores técnicos usados atualmente incluem:
+
+```text
+<slotId>
+confirm:<slotId>
+cancel:<slotId>
+```
+
+- Um UUID de slot seleciona um horário persistido.
+- `confirm:<slotId>` solicita a confirmação do horário selecionado.
+- `cancel:<slotId>` representa a rejeição da confirmação.
+
+A posição visual do botão não é usada como identidade do horário. O backend resolve os IDs contra o banco e valida o contexto da sessão.
+
+---
 
 ## Fluxo de agendamento
 
 ### 1. Oferta
 
-``` text
-Gemini / Mariana
-       │
-       ▼
-  offer_meeting
-       │
-       ▼
-SchedulingAvailabilityService
-       │
-       ▼
-  até 3 slots
-       │
-       ▼
-SchedulingOfferService
-       │
-       ├── scheduling_session
-       ├── scheduling_slots
-       └── assistant message
-       │
-       ▼
-WhatsAppService / Client
-       │
-       ▼
-interactive buttons
-       │
-       ▼
-salvar WAMID outbound
-```
+O serviço de disponibilidade consulta os calendários e fornece os slots elegíveis. O `SchedulingOfferService` persiste a sessão e os horários antes que eles sejam apresentados ao usuário.
 
-### 2. Escolha
+Cada sessão contém os slots relacionados a uma oferta específica. O fluxo prevê até três opções.
 
-O fluxo planejado para a escolha estruturada é:
+### 2. Escolha de horário
 
-``` text
-interactive.button_reply
-       │
-       ▼
-webhook + HMAC
-       │
-       ▼
-parser / normalizador
-       │
-       ▼
-lead + conversation
-       │
-       ▼
-idempotência WAMID
-       │
-       ▼
-SchedulingChoiceService
-       │
-       ├── session
-       ├── slot
-       ├── lead
-       ├── conversation
-       ├── TTL
-       └── estado
-       │
-       ▼
-slot selecionado
-       │
-       ▼
-"Posso confirmar?"
-       │
-       ├──────────────┐
-       ▼              ▼
- [Confirmar]        [Não]
-```
+Quando o usuário seleciona um botão, o `SchedulingChoiceService` verifica o slot e sua sessão. Entre as validações relevantes estão:
 
-### 3. Confirmação
+- Existência do slot.
+- Vínculo com a sessão correspondente.
+- Correspondência entre lead e conversa.
+- Sessão ainda ativa.
+- Sessão não expirada.
+- Compatibilidade com o slot já selecionado.
 
-``` text
-Confirmar
-    │
-    ▼
-AppointmentService
-    │
-    ├── Google Calendar
-    ├── PostgreSQL appointment
-    ├── lead = scheduled
-    └── session = closed
-    │
-    ▼
-confirmação WhatsApp
-```
+A seleção é persistida em `scheduling_sessions.selectedSlotId`.
 
-Com dois ou três slots, `Não` limpa a seleção e reapresenta a mesma
-oferta.
+Se houver dois ou três horários, o usuário recebe a confirmação do horário escolhido. Se houver somente um, o sistema pode apresentar diretamente a pergunta de confirmação daquele horário.
 
-Com um único slot, `Não` fecha a sessão e informa que o horário não será
-confirmado.
+### 3. Confirmação ou rejeição
 
-Não deve haver consulta automática a novos horários nessa resposta.
+O `SchedulingConfirmationService` interpreta os botões `Confirmar` e `Não`. O `SchedulingConfirmationOrchestrator` coordena a validação e encaminha a confirmação ao `AppointmentService`.
 
-------------------------------------------------------------------------
+Em caso de confirmação, o `AppointmentService`:
 
-## Modelo de estado do agendamento
+1. Valida o intervalo de tempo.
+2. Verifica a existência e o estado do consultor.
+3. Valida o lead qualificado.
+4. Valida o estado e a expiração da sessão quando fornecida.
+5. Verifica conflitos de agendamento no PostgreSQL.
+6. Reconsulta a disponibilidade no Google Calendar.
+7. Cria o evento no Google Calendar.
+8. Persiste o appointment e finaliza a sessão segundo as regras do serviço.
+9. Utiliza compensação para excluir o evento criado quando a finalização no banco falha.
 
-A decisão de desenho documentada é manter os três estados atuais da
-sessão:
+Esse processo não constitui uma transação distribuída: ainda existe uma janela de concorrência entre sistemas externos e banco de dados.
 
-``` text
+### 4. Rejeição
+
+Quando o usuário rejeita a confirmação:
+
+- Para uma oferta com dois ou três slots, o fluxo pode limpar a seleção e reapresentar os mesmos horários.
+- Para uma oferta com um único slot, a sessão é encerrada de acordo com o serviço de cancelamento.
+
+A rejeição da confirmação não deve provocar uma nova consulta de disponibilidade automaticamente, salvo se um fluxo separado solicitar novos horários.
+
+### 5. Expiração
+
+As sessões de agendamento possuem `expiresAt` e estados:
+
+```text
 active
 closed
 expired
 ```
 
-A seleção do horário deve ser representada no próprio slot por um campo
-planejado como `selectedAt`, em vez de adicionar um estado
-`pending_confirmation` à sessão.
+A função `expireSchedulingSessionIfOverdue` altera condicionalmente uma sessão `active` para `expired` quando o prazo já passou. Os serviços de seleção e confirmação devem recusar sessões vencidas.
 
-> `selectedAt` ainda não existe no schema atual documentado. A
-> implementação da seleção permanece planejada.
+---
 
-### Transições
+## Persistência e idempotência
 
-``` text
-active + sem seleção
-        │
-        │ usuário escolhe
-        ▼
-active + slot selecionado
-        │
-        ├── Confirmar ──► AppointmentService
-        │                    │
-        │                    ▼
-        │              appointment
-        │                    │
-        │                    ▼
-        │                  closed
-        │
-        └── Não
-             │
-             ├── 2/3 slots → limpa seleção e reapresenta
-             │
-             └── 1 slot → fecha sessão
+### Mensagens
 
-active
-  │
-  │ TTL vencido
-  ▼
-expired
+A tabela `messages` possui `externalId` para mapear IDs externos, especialmente WAMIDs do WhatsApp.
+
+Há um índice único parcial sobre `externalId` quando ele não é nulo, para impedir que o mesmo identificador externo seja persistido em mais de uma mensagem.
+
+### Eventos do webhook
+
+A tabela `whatsapp_webhook_events` registra informações do processamento de eventos, incluindo:
+
+- ID interno.
+- `externalId`, com unicidade.
+- Tipo de evento.
+- Telefone de origem.
+- Conversa associada, quando identificada.
+- Payload persistido.
+- Estado do processamento.
+- Datas de criação e atualização.
+
+Os estados modelados são:
+
+```text
+processing
+processed
+failed
 ```
 
-------------------------------------------------------------------------
+A migration `20261013000000_whatsapp_webhook_idempotency.sql` cria a tabela e o índice único para o identificador externo, além do índice único parcial de mensagens.
 
-## Identidade dos botões
+**Estado atual:** a base de persistência de eventos existe, mas a implementação ainda precisa garantir recuperação efetiva após interrupções, controle robusto de posse durante processamento concorrente e tratamento confiável de falhas no envio de respostas. Um evento marcado como `failed` não é automaticamente recuperado só por existir no banco.
 
-A posição visual do botão (`1`, `2` ou `3`) não deve ser utilizada como
-identificador de negócio.
+### Tarefas autônomas
 
-O identificador técnico deve apontar para o slot persistido.
+O projeto também possui a tabela `autonomous_tasks` e o executor `autonomous-task-executor.ts`, com estados `pending`, `processing`, `completed` e `failed`, idempotency key, tentativas e backoff.
 
-Formato proposto:
+A existência desses componentes não significa que o webhook do WhatsApp já utiliza esse mecanismo para recuperar todos os eventos inbound. A integração e a estratégia de retomada precisam ser verificadas e concluídas antes de considerar o processamento durável.
 
-``` text
-schedule:slot:<slotId>
-schedule:confirm:<sessionId>:<slotId>
-schedule:reject:<sessionId>:<slotId>
-```
+---
 
-O `reply.id` é a autoridade técnica. O `reply.title` serve apenas como
-texto visual/auditoria.
+## Tecnologias
 
-### Validações obrigatórias
+| Tecnologia | Finalidade |
+|---|---|
+| Node.js 24 | Runtime |
+| TypeScript | Linguagem principal |
+| Fastify 5 | Servidor HTTP |
+| Zod 4 | Validação e contratos |
+| PostgreSQL | Banco de dados |
+| Drizzle ORM | Schema, queries e migrations |
+| `postgres` / `pg` | Conectividade com PostgreSQL |
+| Google GenAI SDK | Integração com Gemini |
+| Google Calendar API | Disponibilidade e criação de eventos |
+| WhatsApp Cloud API | Mensagens inbound e outbound |
+| `tsx` | Execução TypeScript e testes |
+| `tsup` | Build |
+| Ultracite / Biome | Verificação e padronização |
+| Docker | Suporte ao ambiente de desenvolvimento |
+| ngrok | Exposição local do webhook durante testes |
 
-Ao receber um botão, o backend deve validar:
-
--   existência do slot;
--   pertencimento do slot à sessão;
--   pertencimento da sessão ao lead identificado;
--   pertencimento da sessão à conversation esperada;
--   sessão em estado `active`;
--   `expiresAt > now`;
--   possibilidade de seleção do slot;
--   ausência de consumo por replay/concorrência.
-
-------------------------------------------------------------------------
-
-## SchedulingChoiceService
-
-O `SchedulingChoiceService` é um serviço planejado para interpretar uma
-escolha persistida de oferta.
-
-### Responsabilidades
-
-Deve:
-
-1.  receber `leadId`, `conversationId`, `buttonId`, `WAMID` e `now`;
-2.  validar o formato do identificador;
-3.  resolver slot e sessão;
-4.  validar posse, conversation, estado e expiração;
-5.  selecionar/deselecionar o slot de forma atômica;
-6.  retornar um resultado tipado para a camada seguinte.
-
-### Não deve
-
--   chamar Gemini;
--   interpretar texto livre;
--   recalcular disponibilidade;
--   escolher outro consultor;
--   criar appointment;
--   interpretar diretamente o payload HTTP bruto do WhatsApp.
-
-O fluxo previsto é:
-
-``` text
-Webhook
-  │
-  ▼
-Normalizador
-  │
-  ▼
-SchedulingChoiceService
-  │
-  ▼
-Orquestrador de confirmação
-  │
-  ▼
-AppointmentService
-```
-
-------------------------------------------------------------------------
-
-## Tecnologias utilizadas
-
-  -----------------------------------------------------------------------
-  Tecnologia                          Finalidade
-  ----------------------------------- -----------------------------------
-  Node.js 24.18                       Runtime do backend
-
-  npm 11.16                           Gerenciamento de dependências e
-                                      scripts
-
-  TypeScript                          Linguagem principal e tipagem de
-                                      domínio/integrações
-
-  Fastify 5                           Servidor HTTP e rotas
-
-  Zod 4                               Validação e contratos de
-                                      entrada/estrutura
-
-  Drizzle ORM 1 RC                    Schema relacional, queries,
-                                      transações e migrations
-
-  PostgreSQL                          Persistência principal
-
-  postgres.js                         Driver/conexão com banco
-
-  Google GenAI SDK                    Integração com Gemini
-
-  Google Calendar API                 FreeBusy, criação e exclusão de
-                                      eventos
-
-  WhatsApp Cloud API                  Canal de entrada e saída
-
-  Docker                              Ambiente de apoio e serviços locais
-
-  tsx                                 Execução de TypeScript em
-                                      desenvolvimento/testes
-
-  tsup                                Build do servidor
-
-  Ultracite / Biome                   Check e padronização de código
-
-  ngrok                               Exposição local do webhook durante
-                                      testes
-  -----------------------------------------------------------------------
-
-------------------------------------------------------------------------
+---
 
 ## Estrutura do projeto
 
-A estrutura abaixo reúne os principais caminhos explicitamente
-identificados no dossiê técnico:
+Principais diretórios e arquivos da branch `develop`:
 
-``` text
+```text
 src/
+├── db/
+│   ├── schema/
+│   │   ├── appointments.ts
+│   │   ├── autonomous-tasks.ts
+│   │   ├── consultants.ts
+│   │   ├── conversations.ts
+│   │   ├── google-calendar-connections.ts
+│   │   ├── leads.ts
+│   │   ├── messages.ts
+│   │   ├── relations.ts
+│   │   ├── scheduling-sessions.ts
+│   │   ├── scheduling-slots.ts
+│   │   └── whatsapp-webhook-events.ts
+│   └── ...
 ├── integrations/
 │   └── whatsapp/
-│       ├── whatsapp-types.ts
 │       ├── whatsapp-client.ts
-│       └── whatsapp-service.ts
-│
+│       ├── whatsapp-service.ts
+│       └── whatsapp-types.ts
 ├── routes/
+│   ├── appointments/
+│   ├── conversations/
+│   ├── google-calendar/
+│   ├── google-ads/
+│   ├── leads/
+│   ├── messages/
+│   ├── meta-ads/
 │   └── whatsapp/
 │       └── webhook-whatsapp.ts
-│
 ├── services/
+│   ├── calendar/
+│   │   ├── appointment-service.ts
+│   │   ├── availability.ts
+│   │   ├── consultant-availability.ts
+│   │   ├── scheduling-availability.ts
+│   │   ├── scheduling-cancellation-service.ts
+│   │   ├── scheduling-choice-service.ts
+│   │   ├── scheduling-confirmation-orchestrator.ts
+│   │   ├── scheduling-confirmation-service.ts
+│   │   ├── scheduling-offer-service.ts
+│   │   └── scheduling-session-expiration.ts
 │   ├── conversations/
+│   │   ├── autonomous-task-executor.ts
+│   │   ├── generateMarianaResponse.ts
+│   │   ├── mariana-safety.ts
+│   │   ├── message-debounce.ts
 │   │   ├── receive-customer-message.ts
-│   │   └── generateMarianaResponse.ts
-│   │
-│   └── calendar/
-│       ├── scheduling-availability-service.ts
-│       ├── scheduling-offer-service.ts
-│       ├── appointment-service.ts
-│       └── scheduling-choice-service.ts
-│          # planejado no estado documentado
-│
-├── db/
-│   └── schema/
-│       ├── leads.ts
-│       ├── conversations.ts
-│       ├── messages.ts
-│       ├── scheduling-sessions.ts
-│       └── scheduling-slots.ts
-│
-└── tests/
-    └── services/
-        ├── generate-mariana-response.test.ts
-        └── scheduling-session.test.ts
+│   │   └── whatsapp-compliance.ts
+│   ├── leads/
+│   └── ...
+├── tests/
+│   ├── integrations/
+│   ├── routes/
+│   ├── services/
+│   └── ...
+├── utils/
+└── server.ts
+
+drizzle/
+├── ... migrations anteriores ...
+├── 20261012000000_persistent_selected_scheduling_slot/
+│   └── migration.sql
+└── 20261013000000_whatsapp_webhook_idempotency.sql
 ```
 
-O dossiê não fornece uma árvore completa do repositório; portanto, esta
-seção apresenta somente os caminhos explicitamente identificados.
+A árvore acima destaca arquivos relevantes para os fluxos principais, sem representar todos os arquivos do repositório.
 
-------------------------------------------------------------------------
+---
 
-## Configuração e instalação
+## Instalação e execução
 
-O dossiê fornece os scripts e requisitos técnicos abaixo, mas não
-especifica neste documento um procedimento completo de instalação do
-ambiente do zero.
+### Pré-requisitos
 
-### Pré-requisitos identificados
+- Node.js 24.
+- npm.
+- PostgreSQL configurado.
+- Credenciais do Google Gemini.
+- Configuração OAuth do Google Calendar.
+- Aplicativo e número configurados na WhatsApp Cloud API.
+- Para testes locais com a Meta, uma URL pública de webhook, por exemplo via ngrok.
 
--   Node.js `24.18`
--   npm `11.16`
--   PostgreSQL
--   credenciais/configuração do Google GenAI/Gemini;
--   credenciais OAuth 2.0 do Google Calendar;
--   configuração da WhatsApp Cloud API;
--   para testes locais do webhook, um túnel como ngrok.
+### Instalar dependências
+
+```bash
+npm install
+```
+
+### Configurar o ambiente
+
+Crie e configure o arquivo de variáveis de ambiente conforme os nomes esperados pelo módulo `src/env.ts`.
+
+Não coloque tokens ou credenciais reais no README, em commits ou em logs compartilhados.
+
+### Aplicar migrations
+
+```bash
+npm run db:migrate
+```
+
+### Executar em desenvolvimento
+
+```bash
+npm run dev
+```
+
+### Executar testes
+
+```bash
+npm run test
+```
+
+### Verificar código e build
+
+```bash
+npm run check
+npm run build
+```
+
+### Iniciar a build
+
+```bash
+npm run start
+```
 
 ### Scripts disponíveis
 
-``` bash
-npm run dev
-npm run build
-npm run start
-npm run test
-npm run check
-npm run fix
+| Script | Finalidade |
+|---|---|
+| `npm run dev` | Executa o servidor com watch via `tsx` |
+| `npm run build` | Gera a build com `tsup` |
+| `npm run start` | Executa `dist/server.js` |
+| `npm run test` | Executa os testes com o runner de teste do Node via `tsx` |
+| `npm run check` | Executa `ultracite check` |
+| `npm run fix` | Executa `ultracite fix` |
+| `npm run db:generate` | Gera migrations com Drizzle Kit |
+| `npm run db:migrate` | Aplica migrations |
+| `npm run db:seed` | Executa o seed do banco |
 
-npm run db:generate
-npm run db:migrate
-npm run db:seed
-```
+A disponibilidade real das integrações depende das credenciais e do ambiente configurados.
 
-Equivalência documentada:
-
-``` text
-build       = tsup src/server.ts --format cjs --clean
-check       = ultracite check
-db:generate = drizzle-kit generate
-db:migrate  = drizzle-kit migrate
-db:seed     = tsx src/db/seed.ts
-dev         = tsx watch src/server.ts
-fix         = ultracite fix
-start       = node dist/server.js
-test        = tsx --test
-```
-
-> O dossiê não especifica valores concretos para as variáveis de
-> ambiente nem fornece um passo a passo adicional de provisionamento do
-> PostgreSQL. Por isso, esses detalhes não são inventados aqui.
-
-------------------------------------------------------------------------
+---
 
 ## Variáveis de ambiente
 
-O projeto utiliza variáveis de ambiente para credenciais do Gemini,
-OAuth do Google e integrações externas.
+O projeto centraliza a leitura e validação das configurações no módulo `src/env.ts`.
 
-O dossiê não fornece uma lista completa e validada dos nomes das
-variáveis. Portanto, este README não inventa nomes de variáveis.
+Os nomes das variáveis devem ser conferidos diretamente nesse arquivo antes de preparar um `.env` novo. A configuração pode incluir, conforme a integração utilizada:
 
-Nunca versionar:
+- Conexão PostgreSQL.
+- Credenciais do Google Gemini.
+- Credenciais OAuth do Google Calendar.
+- Token de verificação e segredo da WhatsApp Cloud API.
+- Token de acesso e identificadores da Meta.
+- Porta do servidor e configurações de debounce.
 
--   tokens;
--   refresh tokens;
--   API keys;
--   senhas;
--   IDs secretos;
--   outros valores sensíveis.
+Não inclua valores reais de credenciais, refresh tokens, API keys ou tokens de acesso no repositório.
 
-Os valores secretos também não devem aparecer em prompts, logs ou
-documentação compartilhada.
+---
 
-------------------------------------------------------------------------
+## Banco de dados e migrations
 
-## API
+O PostgreSQL é a persistência principal.
 
-### WhatsApp Webhook
+### Entidades principais
 
-O projeto possui um webhook para integração com a WhatsApp Cloud API.
+| Entidade | Responsabilidade |
+|---|---|
+| `leads` | Identidade e estado comercial do lead |
+| `conversations` | Contexto de atendimento |
+| `messages` | Histórico de mensagens |
+| `consultants` | Cadastro e disponibilidade dos consultores |
+| `appointments` | Agendamentos e estado dos eventos |
+| `scheduling_sessions` | Estado e validade de uma oferta de horários |
+| `scheduling_slots` | Horários apresentados na oferta |
+| `whatsapp_webhook_events` | Idempotência e estado registrado de eventos inbound |
+| `autonomous_tasks` | Persistência de tarefas de execução autônoma |
 
-O fluxo atual documentado inclui:
+### Sessões e slots
 
--   validação da assinatura HMAC SHA-256;
--   parsing do payload;
--   recebimento de mensagens `text`;
--   identificação do lead;
--   identificação/criação de conversation;
--   persistência da mensagem;
--   geração de resposta;
--   envio da resposta;
--   persistência do WAMID outbound.
+A tabela `scheduling_sessions` mantém:
 
-O dossiê não especifica o método e o path HTTP exatos do endpoint. Por
-isso, eles não são documentados como se fossem conhecidos.
+- `leadId`.
+- `conversationId`.
+- `selectedSlotId`.
+- `status`.
+- `createdAt`.
+- `expiresAt`.
+- `updatedAt`.
 
-### `interactive.button_reply`
+Há um índice único parcial que limita a uma sessão `active` por lead.
 
-O suporte a `interactive.button_reply` está planejado para a evolução do
-fluxo de horários.
+Cada slot persistido possui sua sessão, posição, consultor, calendário, início e fim. Há restrições de unicidade da posição dentro da sessão, posição positiva e intervalo temporal válido.
 
-Quando implementado, o webhook deverá distinguir mensagens de texto de
-respostas estruturadas de botões.
+### Alterações recentes de schema
 
-Respostas de botão:
+- `20261012000000_persistent_selected_scheduling_slot`: adiciona `selectedSlotId` à sessão de agendamento, com chave estrangeira e índice.
+- `20261013000000_whatsapp_webhook_idempotency.sql`: adiciona a tabela de eventos do webhook, sua unicidade por `externalId` e o índice único parcial de mensagens.
 
--   não devem passar pelo debounce;
--   não devem chamar Gemini;
--   devem ser resolvidas diretamente contra `scheduling_slot` e
-    `scheduling_session`;
--   devem validar lead, conversation, estado e TTL;
--   devem ser tratadas de forma idempotente.
+Antes de implantar em outro ambiente, confirme que todas as migrations necessárias foram aplicadas no banco correspondente.
 
-------------------------------------------------------------------------
+---
 
-## Banco de dados
+## Segurança e regras comerciais
 
-O PostgreSQL é a persistência principal e o acesso é realizado com
-Drizzle ORM.
+### Regras de negócio
 
-### Lead
+Mariana pode explicar conceitos gerais de consórcio, qualificar o lead, identificar interesse em falar com consultor, consultar horários reais e conduzir o processo de agendamento.
 
-Concentra os dados de qualificação e o estado comercial.
+Mariana não deve:
 
-Dados de qualificação documentados:
+- Recomendar grupo ou carta específica como orientação financeira personalizada.
+- Prescrever estratégia personalizada de lance.
+- Garantir contemplação ou prazo.
+- Inventar horários, consultores, disponibilidade, IDs ou resultados.
+- Confirmar agendamentos sem a confirmação explícita do cliente.
 
--   nome;
--   telefone;
--   data de nascimento;
--   objetivo;
--   tipo de consórcio;
--   situação atual;
--   dor/motivação;
--   urgência;
--   abordagem comercial;
--   `interestedInConsultant`.
+### Proteções implementadas no backend
 
-Estados:
+- Validação HMAC da assinatura do webhook.
+- Validação de entradas e contratos com Zod.
+- Resolução de botões contra IDs persistidos.
+- Validação de lead, conversa, sessão, slot e expiração nos serviços de agendamento.
+- Revalidação do estado da sessão antes da criação do appointment.
+- Verificação de conflitos no PostgreSQL e reconsulta ao Google Calendar.
+- Uso de IDs externos/WAMIDs e estruturas únicas para deduplicação.
 
-``` text
-new
-qualifying
-qualified
-scheduled
-```
+### Limitações de consistência e recuperação
 
-O telefone é indexado, mas não é único.
+Google Calendar e PostgreSQL não participam de uma única transação distribuída. O fluxo usa compensação quando a finalização no banco falha, mas ainda existe uma janela de concorrência entre consulta e criação do evento externo.
 
-### Conversation
+A idempotência do webhook também não deve ser confundida com entrega garantida. É necessário concluir a recuperação de eventos interrompidos e persistir/reprocessar respostas outbound pendentes sem repetir ações comerciais já realizadas.
 
-Uma conversation pertence a um lead.
+A lógica de manutenção ou recuperação não deve executar efeitos colaterais no banco antes de a assinatura do webhook ser validada.
 
-Estados:
+---
 
-``` text
-active
-closed
-```
+## Testes e validação
 
-As mensagens estão vinculadas à conversation e `updatedAt` é atualizado.
+Execute:
 
-### Message
-
-Mensagens possuem:
-
--   `role`: `user`, `assistant` ou `system`;
--   `content`;
--   `externalId`;
--   timestamps.
-
-`externalId` é utilizado para deduplicação de mensagens externas,
-principalmente WAMID.
-
-> O dossiê registra que `externalId` está indexado, mas não possui
-> constraint `UNIQUE`, deixando uma pequena janela para duplicação
-> concorrente.
-
-### Scheduling Session
-
-Representa uma oferta de horários.
-
-Campos documentados:
-
-``` text
-id
-leadId
-conversationId
-status
-createdAt
-expiresAt
-updatedAt
-```
-
-Estados:
-
-``` text
-active
-closed
-expired
-```
-
-Há um índice parcial para permitir somente uma sessão `active` por lead.
-
-### Scheduling Slot
-
-Representa cada horário persistido em uma sessão.
-
-Campos documentados:
-
-``` text
-id
-schedulingSessionId
-position
-consultantId
-consultantName
-calendarId
-startAt
-endAt
-createdAt
-```
-
-Constraints documentadas:
-
-``` text
-UNIQUE (schedulingSessionId, position)
-position > 0
-startAt < endAt
-```
-
-A representação persistida da seleção por meio de `selectedAt` ainda é
-planejada.
-
-### Appointment
-
-O appointment é persistido pelo fluxo final de agendamento.
-
-O dossiê não fornece o schema completo dessa entidade, portanto este
-README não inventa seus campos.
-
-------------------------------------------------------------------------
-
-## Autenticação e autorização
-
-### WhatsApp
-
-O webhook utiliza validação de assinatura:
-
-``` text
-HMAC SHA-256
-```
-
-### Google Calendar
-
-A integração utiliza:
-
-``` text
-OAuth 2.0
-```
-
-O ambiente de desenvolvimento utiliza uma conta Google pessoal e o
-escopo cobre operações de FreeBusy e eventos.
-
-Os calendários atualmente conectados são de desenvolvimento/teste e não
-representam os calendários reais do cliente em produção.
-
-### Aplicação
-
-O dossiê não especifica um sistema separado de autenticação de usuários
-do backend. Não há informação suficiente para documentar mecanismos
-adicionais de autenticação/autorização.
-
-------------------------------------------------------------------------
-
-## Integrações
-
-### WhatsApp Cloud API
-
-Responsável pelo canal de comunicação com os leads.
-
-Uso documentado:
-
--   recebimento de mensagens;
--   webhook;
--   validação HMAC;
--   envio de mensagens;
--   WAMID;
--   futura utilização de mensagens interativas com botões.
-
-### Google GenAI / Gemini
-
-Responsável pelo processamento conversacional de texto livre e
-qualificação.
-
-O Gemini não deve ser utilizado para resolver decisões estruturadas de
-agendamento.
-
-### Google Calendar API
-
-Responsável por:
-
--   consultar disponibilidade via FreeBusy;
--   criar eventos;
--   excluir eventos quando necessário para compensação.
-
-### Google Ads e Meta Ads
-
-São as origens comerciais dos leads previstas no fluxo do produto.
-
-O dossiê descreve essas plataformas como fontes das campanhas que levam
-os contatos ao WhatsApp, mas não documenta uma integração direta dessas
-APIs dentro do backend atual.
-
-------------------------------------------------------------------------
-
-## IA e governança
-
-A IA possui um papel deliberadamente limitado no domínio.
-
-``` text
-Texto livre
-    │
-    ▼
-Gemini
-    │
-    ├── conversa
-    ├── qualificação
-    └── próxima ação
-```
-
-As decisões críticas de agendamento são determinísticas:
-
-``` text
-Disponibilidade
-    │
-    ▼
-SchedulingAvailabilityService
-    │
-    ▼
-SchedulingOfferService
-    │
-    ▼
-slots persistidos
-    │
-    ▼
-SchedulingChoiceService
-    │
-    ▼
-AppointmentService
-```
-
-### Regra central
-
-O Gemini nunca deve inventar:
-
--   horários;
--   consultores;
--   disponibilidade;
--   IDs;
--   resultados de agendamento.
-
-### Retry
-
-A integração utiliza retry para respostas HTTP transitórias e limites de
-taxa:
-
-``` text
-408
-429
-500
-502
-503
-504
-```
-
-O retry utiliza:
-
--   backoff exponencial;
--   jitter;
--   atraso máximo limitado.
-
-------------------------------------------------------------------------
-
-## Segurança
-
-Mecanismos documentados:
-
--   HMAC SHA-256 no webhook;
--   validação de entrada com Zod;
--   OAuth 2.0 para Google Calendar;
--   persistência de TTL das sessões;
--   validação de lead/conversation/session/slot;
--   verificação de conflitos antes do agendamento;
--   reconsulta do Google Calendar antes da criação do evento;
--   exclusão compensatória de evento quando a transação do banco falha;
--   deduplicação lógica por `externalId`/WAMID;
--   uso de IDs persistidos para resolver botões, em vez de confiar na
-    posição visual;
--   separação entre IA conversacional e decisões determinísticas de
-    agendamento.
-
-### Pontos de endurecimento identificados
-
-O dossiê identifica algumas proteções como planejadas:
-
--   idempotência atômica e possível `UNIQUE` para `externalId`;
--   consumo atômico da seleção;
--   idempotência do appointment;
--   validação integral de `buttonId` contra o banco;
--   observabilidade e recuperação de compensações.
-
-### Caveat de consistência
-
-Google Calendar e PostgreSQL não participam de uma transação
-distribuída.
-
-O código utiliza exclusão compensatória do evento caso a transação do
-banco falhe, mas permanece uma janela de corrida entre a verificação de
-disponibilidade e a criação do evento.
-
-------------------------------------------------------------------------
-
-## Testes
-
-O projeto utiliza o runner de testes do Node via `tsx`:
-
-``` bash
+```bash
 npm run test
+npm run check
+npm run build
 ```
 
-Testes explicitamente mencionados:
+O repositório possui testes de serviços, integrações e rotas, incluindo:
 
-``` text
-src/tests/services/generate-mariana-response.test.ts
-src/tests/services/scheduling-session.test.ts
-```
+- Webhook do WhatsApp.
+- Serviço de integração WhatsApp.
+- Geração de respostas da Mariana.
+- Qualificação e persistência de leads.
+- Disponibilidade e agendamento.
+- Seleção, confirmação e cancelamento de horários.
+- Expiração de sessões.
+- Políticas e compliance das mensagens.
 
-### Validações já registradas
+Um teste direcionado do webhook ter passado não é evidência suficiente, por si só, de que a suíte completa, o check e a build passaram na mesma revisão. Registre os resultados reais da última execução antes de marcar uma etapa como concluída.
 
-No estado documentado em 24/09/2026:
+### Cenários prioritários de teste
 
--   `generate-mariana-response.test.ts`: 6 testes passaram;
--   `scheduling-session.test.ts`: 8 testes passaram;
--   `npm run check`: 103 arquivos verificados sem correções;
--   `npm run build`: concluído com sucesso.
+- Entrega duplicada do mesmo WAMID.
+- Duas entregas concorrentes do mesmo evento.
+- Assinatura inválida sem efeitos colaterais no banco.
+- Interrupção durante o processamento e retomada posterior.
+- Falha no envio de uma resposta outbound.
+- Resposta pendente recuperada sem repetir o agendamento.
+- Lease expirado com tentativa concorrente de retomada.
+- Seleção ou confirmação de sessão expirada.
+- Rejeição de slot pertencente a outro lead/conversa.
+- Conflitos entre PostgreSQL e Google Calendar.
+- Confirmação de um único horário sem pular a confirmação explícita.
 
-O resultado capturado da execução completa de `npm test` não apresentou
-o resumo final. Portanto, o dossiê não considera a suíte completa como
-aprovada.
+---
 
-### Testes planejados para a finalização
+## Estado atual e pendências
 
-#### WhatsApp
+### Implementado na branch `develop`
 
--   parsing e tipagem de `text` e `interactive.button_reply`;
--   payload outbound com 1, 2 e 3 botões;
--   títulos respeitando formato e limites;
--   persistência correta do WAMID outbound;
--   falha HTTP sem falso positivo de envio.
+- Backend Fastify em TypeScript.
+- Integração com WhatsApp Cloud API.
+- Validação da assinatura HMAC do webhook.
+- Ingestão de leads e persistência de conversas/mensagens.
+- Qualificação conversacional assistida por Gemini.
+- Integração com Google Calendar e verificação de disponibilidade.
+- Persistência das sessões de agendamento e dos slots ofertados.
+- Seleção persistida do horário em `selectedSlotId`.
+- Serviço de seleção e validação de slots.
+- Serviços de confirmação e cancelamento/rejeição.
+- Orquestrador de confirmação conectado ao `AppointmentService`.
+- Envio de botões interativos para seleção e confirmação.
+- Recebimento de `interactive.button_reply` no webhook.
+- Expiração de sessões vencidas.
+- Tabela `whatsapp_webhook_events` e migration para idempotência por WAMID.
+- Tabela `autonomous_tasks` e executor de tarefas autônomas.
 
-#### SchedulingChoiceService
+### Em andamento: confiabilidade do processamento
 
--   slot válido;
--   slot inexistente;
--   slot de outra sessão;
--   sessão de outro lead/conversation;
--   sessão fechada;
--   sessão expirada;
--   troca de seleção;
--   duas escolhas concorrentes.
+Esta é a prioridade antes de avançar para novas funcionalidades.
 
-#### Confirmação
+1. **Recuperação durável de eventos inbound:** eventos interrompidos precisam ser efetivamente reprocessados, em vez de apenas mudarem para `failed`.
+2. **Controle de concorrência e posse:** um processador antigo que perde a posse de um evento não deve continuar provocando efeitos externos.
+3. **Recuperação de mensagens já persistidas:** uma redelivery não pode ser descartada como duplicata se a persistência ocorreu antes de o processamento conversacional ser agendado.
+4. **Entrega outbound recuperável:** falhas no envio de respostas não podem ser silenciosamente consideradas como entrega concluída.
+5. **Separação entre ação de negócio e envio da resposta:** recuperar uma mensagem pendente não deve criar outro appointment, repetir uma seleção indevidamente ou duplicar efeitos.
+6. **Validação de assinatura antes de qualquer recuperação ou alteração de dados:** requisições inválidas não devem disparar manutenção do estado dos eventos.
+7. **Validação final da suíte:** executar testes direcionados, suíte completa, `check` e build após as alterações.
 
--   `Confirmar` chama `AppointmentService` uma única vez;
--   slot selecionado chega com dados persistidos;
--   appointment só é criado após validação;
--   conflito recente no Google Calendar impede a confirmação;
--   `Não` em oferta de 2/3 slots limpa a seleção e reapresenta a oferta;
--   `Não` em oferta de 1 slot fecha a sessão.
+### Antes de produção
 
-#### Gemini
+- Validar integrações no ambiente real autorizado pelo cliente.
+- Substituir calendários e consultores fictícios pelos dados reais.
+- Revisar credenciais, permissões e configuração OAuth.
+- Configurar monitoramento, logs e tratamento operacional de falhas.
+- Validar entregas inbound/outbound pelo número de WhatsApp autorizado.
+- Documentar o procedimento de migrations, backup e recuperação.
 
-Um evento `interactive.button_reply` não deve disparar Gemini nem o
-debounce da conversa.
-
-------------------------------------------------------------------------
-
-## Deploy e ambiente
-
-O dossiê não especifica uma plataforma de produção definitiva para o
-backend.
-
-### Desenvolvimento local
-
-O webhook pode ser exposto durante testes por meio de um túnel como:
-
-``` text
-ngrok
-```
-
-### Google Calendar
-
-Antes da produção:
-
--   substituir os calendários de desenvolvimento pelos calendários reais
-    dos consultores;
--   substituir credenciais OAuth de desenvolvimento pelas credenciais
-    apropriadas ao ambiente de produção.
-
-Os consultores usados no ambiente de teste --- João, Maria e Carlos ---
-são fictícios.
-
-### WhatsApp / Meta
-
-Para testes reais de entrega, é necessário um ambiente de negócio e
-número autorizado.
-
-O dossiê registra que um número de teste da Meta retornou o código
-`130497`, associado a uma restrição da conta de negócio de teste para
-mensagens ao país do destinatário. O incidente foi tratado como uma
-limitação do ambiente Meta, e não como uma falha do backend Mariana.
-
-------------------------------------------------------------------------
-
-## Status do projeto
-
-### Implementado
-
-Segundo o estado consolidado no dossiê:
-
--   base de leads;
--   conversations;
--   messages;
--   qualificação com IA;
--   integração com Google Calendar;
--   consulta de disponibilidade;
--   `AppointmentService`;
--   `Scheduling Session`;
--   limite de até três horários por oferta;
--   persistência de `Scheduling Slots`;
--   webhook e recebimento de mensagens de texto;
--   validação HMAC;
--   persistência e deduplicação lógica de mensagens;
--   envio de texto e armazenamento do WAMID outbound.
-
-### Implementado e validado na Etapa 10
-
-A persistência original da Etapa 10 foi implementada.
-
-O `SchedulingOfferService`:
-
-1.  fecha a sessão ativa anterior;
-2.  cria uma nova sessão;
-3.  define expiração de 15 minutos;
-4.  persiste os slots;
-5.  atualiza a mensagem do assistant.
-
-### Em desenvolvimento / planejado
-
--   suporte a `interactive.button_reply`;
--   envio de mensagens interativas;
--   seleção persistida de slot;
--   `SchedulingChoiceService`;
--   orquestrador de confirmação;
--   tratamento de `Confirmar` / `Não`;
--   integração do fluxo interativo com o `AppointmentService`;
--   testes de botões, seleção, confirmação, expiração e concorrência;
--   validação E2E do fluxo interativo;
--   validação no WhatsApp em ambiente autorizado.
-
-### Limitações atuais
-
-No estado documentado:
-
--   o webhook processa somente mensagens `text`;
--   o modelo de `interactive.button_reply` ainda não está implementado;
--   a seleção persistida via `selectedAt` ainda não existe no schema;
--   o `SchedulingChoiceService` ainda é planejado;
--   o orquestrador de confirmação ainda é planejado;
--   a suíte completa de testes ainda não possui resultado final
-    registrado;
--   os calendários atuais são de desenvolvimento/teste;
--   o ambiente Meta utilizado anteriormente apresentou uma restrição de
-    entrega.
-
-------------------------------------------------------------------------
+---
 
 ## Roadmap
 
-### V1
-
-A versão 1 contempla:
-
--   WhatsApp texto;
--   webhook;
--   idempotência básica;
--   leads;
--   conversations;
--   messages;
--   Gemini;
--   qualificação;
--   identificação de interesse em consultor;
--   disponibilidade;
--   oferta;
--   escolha;
--   confirmação;
--   appointment;
--   testes E2E.
-
-### V1.5
-
-Planejado:
-
--   status de entrega;
--   retries mais robustos;
--   idempotência reforçada;
--   tratamento de concorrência;
--   cancelamento;
--   reagendamento;
--   lembretes.
-
-### V2
-
-Planejado:
-
--   imagens;
--   PDFs;
--   documentos;
--   áudio;
--   visão;
--   transcrição;
--   extração multimodal.
-
-------------------------------------------------------------------------
-
-## Ordem de implementação da próxima etapa
-
-A ordem acordada no dossiê é:
-
-1.  fechar o contrato de estado e seleção;
-2.  alterar o schema de slot, se aprovado, e gerar/aplicar migration;
-3.  adicionar tipos do WhatsApp interativo;
-4.  adicionar envio interativo no `WhatsAppClient`;
-5.  expor envio interativo no `WhatsAppService`;
-6.  ajustar `SchedulingOfferService` para o caso de 1 slot e dados
-    outbound;
-7.  ajustar `generateMarianaResponse` para expor a oferta estruturada ao
-    chamador;
-8.  criar `SchedulingChoiceService`;
-9.  criar o orquestrador de confirmação e integrá-lo ao
-    `AppointmentService`;
-10. ajustar `receiveCustomerMessage` para não enviar mensagens
-    interativas ao Gemini;
-11. ajustar o webhook para inbound `text` + `interactive`;
-12. adicionar e executar testes direcionados;
-13. executar `check`;
-14. executar `build`;
-15. executar a suíte completa e registrar o resultado real;
-16. validar no WhatsApp com ambiente autorizado.
-
-### Método de trabalho
-
-As alterações devem ser feitas em pequenos blocos, com teste e validação
-local antes de avançar.
-
-A preferência estabelecida para o projeto é revisar pessoalmente cada
-mudança antes de continuar.
-
-------------------------------------------------------------------------
-
-## Critérios objetivos de conclusão da etapa atual
-
-A finalização do fluxo de horários por botões deve atender aos seguintes
-critérios:
-
-  -----------------------------------------------------------------------
-  Área                                Critério
-  ----------------------------------- -----------------------------------
-  Persistência                        Sessão e slots persistidos
-                                      corretamente, com TTL e seleção
-
-  Oferta                              1, 2 ou 3 horários apresentados
-                                      pelo WhatsApp de forma estruturada
-
-  Escolha                             `button_reply` resolve exatamente
-                                      um slot persistido
-
-  Confirmação                         `Confirmar` e `Não` possuem
-                                      comportamento determinístico
-
-  Segurança                           Lead, conversation, session, TTL e
-                                      slot são validados
-
-  Idempotência                        Replay não gera duas consequências
-
-  Agendamento                         `AppointmentService` permanece como
-                                      barreira final
-
-  Qualidade                           Check, build e testes relevantes
-                                      passam
-  -----------------------------------------------------------------------
-
-------------------------------------------------------------------------
-
-## Alterações previstas
-
-  ---------------------------------------------------------------------------------------------------------------
-  Arquivo / área                                             Status                  Objetivo
-  ---------------------------------------------------------- ----------------------- ----------------------------
-  `src/integrations/whatsapp/whatsapp-types.ts`              Alterar                 Adicionar tipos de
-                                                                                     `interactive/button_reply`
-
-  `src/integrations/whatsapp/whatsapp-client.ts`             Alterar                 Enviar mensagens interativas
-                                                                                     com até 3 botões
-
-  `src/integrations/whatsapp/whatsapp-service.ts`            Alterar                 Expor operação de envio
-                                                                                     interativo
-
-  `src/routes/whatsapp/webhook-whatsapp.ts`                  Alterar                 Processar `text` e
-                                                                                     `interactive.button_reply`
-
-  `src/services/conversations/receive-customer-message.ts`   Alterar                 Persistir interativo sem
-                                                                                     enviar automaticamente para
-                                                                                     debounce/Gemini
-
-  `src/services/conversations/generateMarianaResponse.ts`    Alterar                 Expor contexto estruturado
-                                                                                     da oferta
-
-  `src/services/calendar/scheduling-offer-service.ts`        Alterar                 Registrar seleção de 1 slot
-                                                                                     e dados necessários à oferta
-
-  `src/db/schema/scheduling-slots.ts`                        Alterar                 Adicionar representação
-                                                                                     persistida da seleção, se
-                                                                                     aprovada
-
-  `src/services/calendar/scheduling-choice-service.ts`       Criar                   Resolver e validar
-                                                                                     `buttonId` contra sessão +
-                                                                                     slot
-
-  Orquestrador de confirmação                                Criar                   Tratar `Confirmar`/`Não` e
-                                                                                     chamar `AppointmentService`
-
-  `src/services/calendar/appointment-service.ts`             Manter                  Continuar como validação
-                                                                                     final e criação
-
-  `src/db/schema/scheduling-sessions.ts`                     Manter inicialmente     Estados atuais são
-                                                                                     suficientes
-
-  `src/db/schema/messages.ts`                                Manter inicialmente     Modelo atual suporta
-                                                                                     auditoria e WAMID
-
-  Migration                                                  Criar quando necessária Aplicar somente alterações
-                                                                                     de schema aprovadas
-
-  Testes                                                     Expandir                Cobrir botões, seleção,
-                                                                                     confirmação, expiração e
-                                                                                     concorrência
-  ---------------------------------------------------------------------------------------------------------------
-
-------------------------------------------------------------------------
-
-## Decisões técnicas importantes
-
-### IA fora do caminho crítico de agendamento
-
-A IA é utilizada para conversação e qualificação, enquanto decisões de
-agendamento são feitas por serviços determinísticos.
-
-Isso evita que uma resposta generativa altere diretamente:
-
--   horário;
--   consultor;
--   disponibilidade;
--   identificadores;
--   resultado de agendamento.
-
-### Persistência da oferta
-
-Os horários apresentados ao usuário são persistidos em
-`scheduling_session` e `scheduling_slots`.
-
-Isso permite que a escolha posterior seja resolvida contra dados
-persistidos, em vez de depender novamente de texto livre.
-
-### Identificador técnico independente da posição
-
-O número visual do botão não representa a identidade do horário.
-
-O backend utiliza IDs persistidos de slot/sessão, reduzindo ambiguidades
-quando uma nova oferta substitui uma anterior.
-
-### AppointmentService como última barreira
-
-Mesmo após a seleção do usuário, o appointment só é criado depois de
-novas validações de domínio, PostgreSQL e Google Calendar.
-
-------------------------------------------------------------------------
-
-## Limitações e observações
-
-### Consistência entre PostgreSQL e Google Calendar
-
-Não existe transação distribuída entre os dois sistemas.
-
-O mecanismo atual utiliza exclusão compensatória do evento quando a
-transação do banco falha. Ainda existe uma janela de corrida entre a
-consulta de disponibilidade e a criação do evento.
-
-### Idempotência
-
-`externalId` está indexado, mas não é `UNIQUE` no estado documentado.
-
-A idempotência mais forte e o tratamento de concorrência são pontos
-planejados.
-
-### Expiração
-
-As sessões possuem `expiresAt` e devem ser recusadas após o vencimento.
-
-O fluxo final deve garantir que uma escolha feita depois do TTL não seja
-aceita.
-
-### Ambiente de produção
-
-Os calendários e consultores atualmente usados são de teste.
-
-Antes da produção, devem ser substituídos pelos dados reais fornecidos
-pelo cliente.
-
-### Credenciais
-
-Credenciais OAuth, tokens, API keys e outros segredos não devem ser
-versionados ou incluídos no README.
-
-------------------------------------------------------------------------
-
-## Contribuição e método de desenvolvimento
-
-O projeto segue um fluxo incremental:
-
-``` text
-Alteração pequena
-      │
-      ▼
-Teste direcionado
-      │
-      ▼
-Validação local
-      │
-      ▼
-Revisão da mudança
-      │
-      ▼
-Próxima etapa
-```
-
-Antes de implementar novas alterações, o contrato de seleção/confirmacão
-deve ser revisado.
-
-A branch `develop` é a referência de código atual descrita no dossiê.
-
-------------------------------------------------------------------------
+### Etapa atual — Confiabilidade do webhook
+
+- Consolidar a idempotência por WAMID.
+- Integrar o processamento inbound a um mecanismo durável.
+- Definir política de retry e recuperação.
+- Impedir efeitos colaterais após perda da posse do evento.
+- Persistir e recuperar respostas outbound pendentes.
+- Criar testes de falha, redelivery e concorrência.
+- Rodar suíte completa, check e build.
+
+### Etapa seguinte — Validação end-to-end
+
+- Validar o fluxo real de qualificação.
+- Testar ofertas com um, dois e três horários.
+- Testar seleção, confirmação, cancelamento e expiração.
+- Validar persistência de appointments e eventos no Google Calendar.
+- Confirmar o comportamento no WhatsApp autorizado.
+- Registrar os resultados de testes em ambiente integrado.
+
+### Etapas futuras
+
+- Reagendamento.
+- Lembretes.
+- Acompanhamento de status de entrega.
+- Melhorias operacionais e de observabilidade.
+- Suporte a áudio, imagens, PDFs e outros conteúdos multimodais, se aprovados no escopo.
+
+---
 
 ## Licença
 
-O dossiê técnico não especifica uma licença para o projeto. Nenhuma
-licença é declarada neste README.
+Este README não declara uma licença de distribuição. Consulte o campo de licença do `package.json` e os arquivos legais do repositório antes de reutilizar ou distribuir o projeto.
 
-------------------------------------------------------------------------
+---
 
-## Referência técnica
+## Método de desenvolvimento
 
-Este README foi estruturado a partir do **Dossiê Técnico de Continuidade
---- Projeto Mariana**, consolidado em 24/09/2026.
+O projeto segue uma abordagem incremental:
 
-O dossiê registra tanto funcionalidades verificadas quanto decisões
-arquiteturais ainda não implementadas. Portanto, este documento
-diferencia explicitamente o estado implementado do planejamento,
-especialmente no fluxo de seleção e confirmação de horários por botões
-interativos do WhatsApp.
+```text
+Análise do estado atual
+        │
+        ▼
+Mudança pequena e isolada
+        │
+        ▼
+Teste direcionado
+        │
+        ▼
+Suíte completa + check + build
+        │
+        ▼
+Revisão da alteração
+        │
+        ▼
+Próxima etapa
+```
+
+A branch `develop` é a referência técnica usada neste documento. Atualize o README após mudanças de arquitetura, migrations, scripts ou estado funcional do sistema.
