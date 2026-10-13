@@ -4,10 +4,12 @@
 /** biome-ignore-all lint/suspicious/useAwait: <> */
 /** biome-ignore-all assist/source/useSortedKeys: <> */
 
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq, ne, sql } from "drizzle-orm";
 import type { FastifyPluginCallbackZod } from "fastify-type-provider-zod";
+
 import { db } from "../../db/connections";
 import {
+	autonomousTasks,
 	conversations,
 	messages,
 	whatsappWebhookEvents,
@@ -15,58 +17,14 @@ import {
 import { env } from "../../env";
 import { whatsAppService } from "../../integrations/whatsapp/whatsapp-service";
 import type { WhatsAppWebhookPayload } from "../../integrations/whatsapp/whatsapp-types";
-import { SchedulingCancellationService } from "../../services/calendar/scheduling-cancellation-service";
-import { SchedulingChoiceService } from "../../services/calendar/scheduling-choice-service";
-import { SchedulingConfirmationOrchestrator } from "../../services/calendar/scheduling-confirmation-orchestrator";
-import { SchedulingConfirmationService } from "../../services/calendar/scheduling-confirmation-service";
-import { buildWhatsAppSchedulingOffer } from "../../services/calendar/scheduling-offer-service";
-import { receiveCustomerMessage } from "../../services/conversations/receive-customer-message";
-import { assertWhatsAppOutboundAllowed } from "../../services/conversations/whatsapp-compliance";
+import {
+	PROCESS_BUTTON_REPLY_TASK,
+	PROCESS_INBOUND_MESSAGE_TASK,
+} from "../../services/conversations/autonomous-task-handlers";
+import { isOptOutRequest } from "../../services/conversations/whatsapp-compliance";
 import { leadIngestionService } from "../../services/leads/lead-ingestion";
-import { formatSlotDate } from "../../utils/date-formatter";
-
-const schedulingChoiceService = new SchedulingChoiceService();
-
-const schedulingConfirmationService = new SchedulingConfirmationService();
-
-const schedulingConfirmationOrchestrator =
-	new SchedulingConfirmationOrchestrator();
-
-const schedulingCancellationService = new SchedulingCancellationService();
 
 const WHATSAPP_WEBHOOK_EVENT_LEASE_MS = 60_000;
-
-async function sendCompliantText({
-	conversationId,
-	leadId,
-	text,
-	to,
-}: {
-	conversationId: string;
-	leadId: string;
-	text: string;
-	to: string;
-}) {
-	await assertWhatsAppOutboundAllowed({ conversationId, leadId });
-	return await whatsAppService.sendTextMessage(to, text);
-}
-
-async function sendCompliantButtons({
-	body,
-	buttons,
-	conversationId,
-	leadId,
-	to,
-}: {
-	body: string;
-	buttons: Parameters<typeof whatsAppService.sendReplyButtonsMessage>[2];
-	conversationId: string;
-	leadId: string;
-	to: string;
-}) {
-	await assertWhatsAppOutboundAllowed({ conversationId, leadId });
-	return await whatsAppService.sendReplyButtonsMessage(to, body, buttons);
-}
 
 async function recoverStaleProcessingWebhookEvents() {
 	const now = new Date();
@@ -103,6 +61,15 @@ async function claimWhatsAppWebhookEvent({
 		now.getTime() + WHATSAPP_WEBHOOK_EVENT_LEASE_MS
 	);
 
+	const reclaimValues = {
+		lastError: null,
+		leaseExpiresAt,
+		payload,
+		phone,
+		status: "processing" as const,
+		updatedAt: now,
+	};
+
 	const [insertedEvent] = await db
 		.insert(whatsappWebhookEvents)
 		.values({
@@ -117,10 +84,7 @@ async function claimWhatsAppWebhookEvent({
 		.returning();
 
 	if (insertedEvent) {
-		return {
-			duplicate: false,
-			event: insertedEvent,
-		};
+		return { duplicate: false, event: insertedEvent };
 	}
 
 	const [existingEvent] = await db
@@ -130,151 +94,70 @@ async function claimWhatsAppWebhookEvent({
 		.limit(1);
 
 	if (!existingEvent) {
-		return {
-			duplicate: false,
-		};
+		return { duplicate: false as const };
 	}
 
-	if (existingEvent.status === "processed") {
-		return {
-			duplicate: true,
-			event: existingEvent,
-		};
-	}
+	const canReclaim =
+		existingEvent.status === "failed" ||
+		(existingEvent.status === "processing" &&
+			(!existingEvent.leaseExpiresAt || existingEvent.leaseExpiresAt <= now));
 
-	if (existingEvent.status === "failed") {
+	if (canReclaim) {
 		const [reclaimedEvent] = await db
 			.update(whatsappWebhookEvents)
-			.set({
-				lastError: null,
-				leaseExpiresAt,
-				payload,
-				phone,
-				status: "processing",
-				updatedAt: now,
-			})
+			.set(reclaimValues)
 			.where(
 				and(
 					eq(whatsappWebhookEvents.externalId, externalId),
-					eq(whatsappWebhookEvents.status, "failed")
+					eq(whatsappWebhookEvents.status, existingEvent.status)
 				)
 			)
 			.returning();
 
 		if (reclaimedEvent) {
-			return {
-				duplicate: false,
-				event: reclaimedEvent,
-			};
+			return { duplicate: false, event: reclaimedEvent };
 		}
 	}
 
-	if (existingEvent.status === "processing") {
-		if (!existingEvent.leaseExpiresAt || existingEvent.leaseExpiresAt > now) {
-			return {
-				duplicate: true,
-				event: existingEvent,
-			};
-		}
+	return { duplicate: true as const, event: existingEvent };
+}
 
-		const [reclaimedEvent] = await db
-			.update(whatsappWebhookEvents)
-			.set({
+async function enqueueTask({
+	conversationId,
+	idempotencyKey,
+	payload,
+	taskType,
+	triggerMessageId,
+}: {
+	conversationId: string;
+	idempotencyKey: string;
+	payload: Record<string, unknown>;
+	taskType: string;
+	triggerMessageId?: string;
+}) {
+	await db
+		.insert(autonomousTasks)
+		.values({
+			conversationId,
+			idempotencyKey,
+			payload,
+			taskType,
+			triggerMessageId: triggerMessageId ?? null,
+		})
+		.onConflictDoUpdate({
+			set: {
+				availableAt: new Date(),
+				attempts: 0,
 				lastError: null,
-				leaseExpiresAt,
+				leaseExpiresAt: null,
+				leaseToken: null,
 				payload,
-				phone,
-				status: "processing",
-				updatedAt: now,
-			})
-			.where(
-				and(
-					eq(whatsappWebhookEvents.externalId, externalId),
-					eq(whatsappWebhookEvents.status, "processing"),
-					sql`${whatsappWebhookEvents.leaseExpiresAt} IS NOT NULL AND ${whatsappWebhookEvents.leaseExpiresAt} <= ${now.toISOString()}`
-				)
-			)
-			.returning();
-
-		if (reclaimedEvent) {
-			return {
-				duplicate: false,
-				event: reclaimedEvent,
-			};
-		}
-	}
-
-	return {
-		duplicate: true,
-		event: existingEvent,
-	};
-}
-
-async function markWhatsAppWebhookEventProcessed(
-	event: typeof whatsappWebhookEvents.$inferSelect
-) {
-	if (!event.leaseExpiresAt) {
-		return;
-	}
-
-	await db
-		.update(whatsappWebhookEvents)
-		.set({
-			lastError: null,
-			leaseExpiresAt: null,
-			status: "processed",
-			updatedAt: new Date(),
-		})
-		.where(
-			and(
-				eq(whatsappWebhookEvents.id, event.id),
-				eq(whatsappWebhookEvents.status, "processing"),
-				eq(whatsappWebhookEvents.leaseExpiresAt, event.leaseExpiresAt)
-			)
-		);
-}
-
-async function markWhatsAppWebhookEventFailed(
-	event: typeof whatsappWebhookEvents.$inferSelect,
-	reason: string
-) {
-	if (!event.leaseExpiresAt) {
-		return;
-	}
-
-	const [existingEvent] = await db
-		.select()
-		.from(whatsappWebhookEvents)
-		.where(
-			and(
-				eq(whatsappWebhookEvents.id, event.id),
-				eq(whatsappWebhookEvents.status, "processing"),
-				eq(whatsappWebhookEvents.leaseExpiresAt, event.leaseExpiresAt)
-			)
-		)
-		.limit(1);
-
-	const nextPayload =
-		typeof existingEvent?.payload === "object" && existingEvent?.payload
-			? { ...(existingEvent.payload as Record<string, unknown>), error: reason }
-			: { error: reason };
-
-	await db
-		.update(whatsappWebhookEvents)
-		.set({
-			lastError: reason,
-			leaseExpiresAt: null,
-			payload: nextPayload,
-			status: "failed",
-			updatedAt: new Date(),
-		})
-		.where(
-			and(
-				eq(whatsappWebhookEvents.id, event.id),
-				eq(whatsappWebhookEvents.status, "processing"),
-				eq(whatsappWebhookEvents.leaseExpiresAt, event.leaseExpiresAt)
-			)
-		);
+				status: "pending",
+				updatedAt: new Date(),
+			},
+			setWhere: ne(autonomousTasks.status, "processing"),
+			target: autonomousTasks.idempotencyKey,
+		});
 }
 
 export const webhookWhatsApp: FastifyPluginCallbackZod = (app, _opts, done) => {
@@ -380,86 +263,59 @@ export const webhookWhatsApp: FastifyPluginCallbackZod = (app, _opts, done) => {
 					const content = message.text?.body;
 					const buttonId = message.interactive?.button_reply?.id;
 					const eventType = isButtonReply ? "button_reply" : "text";
+
 					const eventReceipt = await claimWhatsAppWebhookEvent({
 						eventType,
 						externalId,
-						payload: {
-							buttonId,
-							content,
-							message,
-							phone,
-						},
+						payload: { buttonId, content, message, phone },
 						phone,
 					});
 
-					if (eventReceipt.duplicate) {
+					if (eventReceipt.duplicate || !eventReceipt.event) {
 						continue;
 					}
 
-					const contact = value.contacts?.find((c) => c.wa_id === phone);
+					const event = eventReceipt.event;
 
-					const profileName = contact?.profile?.name;
+					try {
+						const contact = value.contacts?.find((c) => c.wa_id === phone);
 
-					const ingestionResult = await leadIngestionService.ingest({
-						name: profileName,
-						phone,
-						source: "whatsapp",
-					});
+						const ingestionResult = await leadIngestionService.ingest({
+							name: contact?.profile?.name,
+							phone,
+							source: "whatsapp",
+						});
 
-					const lead = ingestionResult.lead;
+						const lead = ingestionResult.lead;
 
-					let [conversation] = await db
-						.select()
-						.from(conversations)
-						.where(
-							and(
-								eq(conversations.leadId, lead.id),
-								eq(conversations.status, "active")
+						let [conversation] = await db
+							.select()
+							.from(conversations)
+							.where(
+								and(
+									eq(conversations.leadId, lead.id),
+									eq(conversations.status, "active")
+								)
 							)
-						)
-						.limit(1);
+							.limit(1);
 
-					if (!conversation) {
-						[conversation] = await db
-							.insert(conversations)
-							.values({
-								leadId: lead.id,
-							})
-							.returning();
-					}
+						if (!conversation) {
+							[conversation] = await db
+								.insert(conversations)
+								.values({ leadId: lead.id })
+								.returning();
+						}
 
-					if (eventReceipt.event?.id) {
 						await db
 							.update(whatsappWebhookEvents)
-							.set({
-								conversationId: conversation.id,
-								updatedAt: new Date(),
-							})
-							.where(eq(whatsappWebhookEvents.id, eventReceipt.event.id));
-					}
+							.set({ conversationId: conversation.id, updatedAt: new Date() })
+							.where(eq(whatsappWebhookEvents.id, event.id));
 
-					/*
-					 * Fluxo determinístico de seleção,
-					 * confirmação e cancelamento
-					 * de horário.
-					 *
-					 * UUID puro:
-					 *   representa um slot persistido.
-					 *
-					 * confirm:<slotId>:
-					 *   confirma o horário selecionado.
-					 *
-					 * cancel:<slotId>:
-					 *   rejeita a confirmação.
-					 *
-					 * Nenhum desses fluxos passa por
-					 * receiveCustomerMessage/debounce/Gemini.
-					 */
-
-					if (buttonId) {
-						try {
-							// An interactive reply is also an inbound customer action and
-							// therefore renews the customer-service window.
+						if (isButtonReply && buttonId) {
+							/*
+							 * Uma resposta interativa também é uma ação de entrada
+							 * do cliente e renova a janela de atendimento.
+							 */
 							await db
 								.update(conversations)
 								.set({
@@ -467,379 +323,81 @@ export const webhookWhatsApp: FastifyPluginCallbackZod = (app, _opts, done) => {
 									updatedAt: new Date(),
 								})
 								.where(eq(conversations.id, conversation.id));
-							/*
-							 * 1. Confirmação explícita
-							 */
-							if (buttonId.startsWith("confirm:")) {
-								const confirmationResult =
-									await schedulingConfirmationOrchestrator.execute({
-										buttonId,
-										conversationId: conversation.id,
-										leadId: lead.id,
-									});
 
-								if (!confirmationResult.ok) {
-									request.log.warn({
-										event: "whatsapp_scheduling_confirmation_rejected",
-										reason: confirmationResult.reason,
-										buttonId,
-										leadId: lead.id,
-										conversationId: conversation.id,
-										externalId,
-									});
-
-									if (eventReceipt.event?.id) {
-										await markWhatsAppWebhookEventProcessed(eventReceipt.event);
-									}
-
-									continue;
-								}
-
-								if (confirmationResult.action === "confirm") {
-									const { appointment, slot } = confirmationResult;
-
-									const finalReply = `Agendamento confirmado para ${formatSlotDate(
-										slot.startAt
-									)} com ${slot.consultantName}.`;
-
-									try {
-										const sendResponse = await sendCompliantText({
-											conversationId: conversation.id,
-											leadId: lead.id,
-											text: finalReply,
-											to: lead.phone,
-										});
-
-										const outboundWamid = sendResponse.messages[0]?.id;
-
-										request.log.info({
-											event: "whatsapp_scheduling_confirmed",
-											appointmentId: appointment.appointmentId,
-											conversationId: conversation.id,
-											leadId: lead.id,
-											externalId,
-											outboundWamid,
-										});
-									} catch (err) {
-										request.log.error(
-											{
-												err,
-												event: "whatsapp_scheduling_confirmation_send_failed",
-												appointmentId: appointment.appointmentId,
-												conversationId: conversation.id,
-												leadId: lead.id,
-												externalId,
-											},
-											"Failed to send scheduling confirmation to WhatsApp"
-										);
-									}
-								}
-
-								if (eventReceipt.event?.id) {
-									await markWhatsAppWebhookEventProcessed(eventReceipt.event);
-								}
-
-								continue;
-							}
-
-							/*
-							 * 2. Cliente não confirmou
-							 *
-							 * 2/3 slots:
-							 *   reapresenta os mesmos slots.
-							 *
-							 * 1 slot:
-							 *   fecha a sessão.
-							 *
-							 * Nenhuma nova consulta ao
-							 * Google Calendar é feita aqui.
-							 */
-							if (buttonId.startsWith("cancel:")) {
-								const cancellationResult =
-									await schedulingCancellationService.resolveCancellation({
-										buttonId,
-										conversationId: conversation.id,
-										leadId: lead.id,
-									});
-
-								if (!cancellationResult.ok) {
-									request.log.warn({
-										event: "whatsapp_scheduling_cancellation_rejected",
-										reason: cancellationResult.reason,
-										buttonId,
-										leadId: lead.id,
-										conversationId: conversation.id,
-										externalId,
-									});
-
-									if (eventReceipt.event?.id) {
-										await markWhatsAppWebhookEventProcessed(eventReceipt.event);
-									}
-
-									continue;
-								}
-
-								if (cancellationResult.action === "reoffer") {
-									const buttons = cancellationResult.slots.map((slot) => ({
-										id: slot.id,
-										title: formatSlotDate(slot.startAt),
-									}));
-
-									try {
-										const sendResponse = await sendCompliantButtons({
-											body: "Tudo bem. Tenho estes horários disponíveis:",
-											buttons,
-											conversationId: conversation.id,
-											leadId: lead.id,
-											to: lead.phone,
-										});
-
-										const outboundWamid = sendResponse.messages[0]?.id;
-
-										request.log.info({
-											event: "whatsapp_scheduling_offer_reoffered",
-											sessionId: cancellationResult.session.id,
-											slotCount: cancellationResult.slots.length,
-											leadId: lead.id,
-											conversationId: conversation.id,
-											externalId,
-											outboundWamid,
-										});
-									} catch (err) {
-										request.log.error(
-											{
-												err,
-												event: "whatsapp_scheduling_reoffer_send_failed",
-												leadId: lead.id,
-												conversationId: conversation.id,
-												sessionId: cancellationResult.session.id,
-												externalId,
-											},
-											"Failed to reoffer scheduling slots to WhatsApp"
-										);
-									}
-
-									if (eventReceipt.event?.id) {
-										await markWhatsAppWebhookEventProcessed(eventReceipt.event);
-									}
-
-									continue;
-								}
-
-								const finalReply =
-									"Tudo bem. Esse horário não foi confirmado. Quando quiser, podemos consultar novos horários.";
-
-								try {
-									const sendResponse = await sendCompliantText({
-										conversationId: conversation.id,
-										leadId: lead.id,
-										text: finalReply,
-										to: lead.phone,
-									});
-
-									const outboundWamid = sendResponse.messages[0]?.id;
-
-									request.log.info({
-										event:
-											"whatsapp_scheduling_session_closed_after_cancellation",
-										sessionId: cancellationResult.session.id,
-										leadId: lead.id,
-										conversationId: conversation.id,
-										externalId,
-										outboundWamid,
-									});
-								} catch (err) {
-									request.log.error(
-										{
-											err,
-											event: "whatsapp_scheduling_cancellation_send_failed",
-											sessionId: cancellationResult.session.id,
-											leadId: lead.id,
-											conversationId: conversation.id,
-											externalId,
-										},
-										"Failed to send scheduling cancellation message to WhatsApp"
-									);
-								}
-
-								if (eventReceipt.event?.id) {
-									await markWhatsAppWebhookEventProcessed(eventReceipt.event);
-								}
-
-								continue;
-							}
-
-							const choiceResult = await schedulingChoiceService.resolveChoice({
-								buttonId,
+							await enqueueTask({
 								conversationId: conversation.id,
-								leadId: lead.id,
-							});
-
-							if (!choiceResult.ok) {
-								request.log.warn({
-									event: "whatsapp_scheduling_choice_rejected",
-									reason: choiceResult.reason,
+								idempotencyKey: `button-reply:${externalId}`,
+								payload: {
 									buttonId,
-									leadId: lead.id,
-									conversationId: conversation.id,
-									externalId,
-								});
-
-								if (eventReceipt.event?.id) {
-									await markWhatsAppWebhookEventProcessed(eventReceipt.event);
-								}
-
-								continue;
-							}
-
-							const confirmation =
-								schedulingConfirmationService.buildConfirmationMessage(
-									choiceResult.slot
-								);
-
-							try {
-								const sendResponse = await sendCompliantButtons({
-									body: confirmation.body,
-									buttons: confirmation.buttons,
-									conversationId: conversation.id,
-									leadId: lead.id,
-									to: lead.phone,
-								});
-
-								request.log.info({
-									event: "whatsapp_scheduling_confirmation_sent",
-									buttonId,
-									slotId: choiceResult.slot.id,
-									sessionId: choiceResult.session.id,
-									leadId: lead.id,
-									conversationId: conversation.id,
-									externalId,
-									outboundWamid: sendResponse.messages[0]?.id,
-								});
-							} catch (err) {
-								request.log.error(
-									{
-										err,
-										event: "whatsapp_scheduling_confirmation_send_failed",
-										buttonId,
-										slotId: choiceResult.slot.id,
-										sessionId: choiceResult.session.id,
-										leadId: lead.id,
-										conversationId: conversation.id,
-										externalId,
-									},
-									"Failed to send scheduling confirmation to WhatsApp"
-								);
-							}
-
-							if (eventReceipt.event?.id) {
-								await markWhatsAppWebhookEventProcessed(eventReceipt.event);
-							}
-
-							continue;
-						} catch (err) {
-							if (eventReceipt.event?.id) {
-								await markWhatsAppWebhookEventFailed(
-									eventReceipt.event,
-									err instanceof Error ? err.message : String(err)
-								);
-							}
-
-							request.log.error(
-								{
-									err,
-									event: "whatsapp_button_reply_processing_failed",
-									externalId,
-									leadId: lead.id,
-									conversationId: conversation.id,
+									eventExternalId: externalId,
+									eventId: event.id,
+									kind: "button_reply",
 								},
-								"Failed to process WhatsApp button reply"
-							);
-							continue;
+								taskType: PROCESS_BUTTON_REPLY_TASK,
+							});
+						} else if (content) {
+							const [insertedMessage] = await db
+								.insert(messages)
+								.values({
+									content,
+									conversationId: conversation.id,
+									externalId,
+									role: "user",
+								})
+								.onConflictDoNothing()
+								.returning();
+
+							const inboundMessage =
+								insertedMessage ??
+								(
+									await db
+										.select()
+										.from(messages)
+										.where(eq(messages.externalId, externalId))
+										.limit(1)
+								)[0];
+
+							await db
+								.update(conversations)
+								.set({
+									lastCustomerMessageAt: new Date(),
+									updatedAt: new Date(),
+									...(isOptOutRequest(content) ? { optOutAt: new Date() } : {}),
+								})
+								.where(eq(conversations.id, conversation.id));
+
+							await enqueueTask({
+								conversationId: conversation.id,
+								idempotencyKey: `inbound:${externalId}`,
+								payload: {
+									eventExternalId: externalId,
+									eventId: event.id,
+									kind: "text",
+								},
+								taskType: PROCESS_INBOUND_MESSAGE_TASK,
+								triggerMessageId: inboundMessage?.id,
+							});
 						}
-					}
-					/*
-					 * Fluxo textual existente.
-					 *
-					 * Somente mensagens de texto chegam aqui.
-					 * Buttons sempre foram tratados acima.
-					 */
-					if (!content) {
-						continue;
-					}
-
-					const targetPhone = lead.phone;
-
-					try {
-						await receiveCustomerMessage({
-							content,
-							conversationId: conversation.id,
-							externalId,
-							role: "user",
-							onMarianaResponse: async (marianaResult) => {
-								try {
-									const sendResponse = marianaResult.schedulingOffer
-										? await sendCompliantButtons({
-												...(marianaResult.schedulingOffer.slots.length === 1
-													? schedulingConfirmationService.buildSingleSlotConfirmationMessage(
-															marianaResult.schedulingOffer.slots[0]
-														)
-													: buildWhatsAppSchedulingOffer(
-															marianaResult.schedulingOffer.slots
-														)),
-												conversationId: conversation.id,
-												leadId: lead.id,
-												to: targetPhone,
-											})
-										: await sendCompliantText({
-												conversationId: conversation.id,
-												leadId: lead.id,
-												text: marianaResult.result.reply,
-												to: targetPhone,
-											});
-
-									const outboundWamid = sendResponse.messages[0]?.id;
-
-									if (outboundWamid && marianaResult.assistantMessage?.id) {
-										await db
-											.update(messages)
-											.set({
-												externalId: outboundWamid,
-											})
-											.where(
-												eq(messages.id, marianaResult.assistantMessage.id)
-											);
-									}
-								} catch (err) {
-									console.error(
-										"[WhatsAppWebhook] Failed to send Mariana reply to WhatsApp:",
-										err
-									);
-								} finally {
-									if (eventReceipt.event) {
-										await markWhatsAppWebhookEventProcessed(eventReceipt.event);
-									}
-								}
-							},
-						});
 					} catch (err) {
-						if (eventReceipt.event?.id) {
-							await markWhatsAppWebhookEventFailed(
-								eventReceipt.event,
-								err instanceof Error ? err.message : String(err)
-							);
-						}
-
 						request.log.error(
 							{
 								err,
-								event: "whatsapp_text_message_processing_failed",
+								event: "whatsapp_webhook_enqueue_failed",
 								externalId,
-								leadId: lead.id,
-								conversationId: conversation.id,
+								conversationId: undefined,
 							},
-							"Failed to process WhatsApp text message"
+							"Failed to durably enqueue WhatsApp event"
 						);
+
+						await db
+							.update(whatsappWebhookEvents)
+							.set({
+								lastError: err instanceof Error ? err.message : String(err),
+								leaseExpiresAt: null,
+								status: "failed",
+								updatedAt: new Date(),
+							})
+							.where(eq(whatsappWebhookEvents.id, event.id));
 					}
 				}
 			}

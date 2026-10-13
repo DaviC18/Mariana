@@ -41,6 +41,12 @@ export const autonomousTasks = pgTable(
 		idempotencyKey: text().notNull().unique(),
 		lastError: text(),
 
+		// Lease da execução atual. O token identifica o dono do lease para
+		// impedir que um worker expirado sobrescreva o resultado de uma tarefa
+		// reclamada por outro worker.
+		leaseExpiresAt: timestamp({ withTimezone: true }),
+		leaseToken: uuid(),
+
 		lockedAt: timestamp({ withTimezone: true }),
 		maxAttempts: integer().notNull().default(5),
 		maxSteps: integer().notNull().default(8),
@@ -61,12 +67,11 @@ export const autonomousTasks = pgTable(
 		// Ex.: process_inbound, execute_action, send_message.
 		taskType: text().notNull(),
 
-		// Mensagem que iniciou o fluxo autônomo.
-		triggerMessageId: uuid()
-			.notNull()
-			.references(() => messages.id, {
-				onDelete: "cascade",
-			}),
+		// Mensagem que iniciou o fluxo autônomo. Opcional para ações que não
+		// geram mensagem de entrada (ex.: resposta de botão).
+		triggerMessageId: uuid().references(() => messages.id, {
+			onDelete: "cascade",
+		}),
 
 		updatedAt: timestamp({ withTimezone: true }).notNull().defaultNow(),
 
@@ -81,6 +86,9 @@ export const autonomousTasks = pgTable(
 			table.status,
 			table.availableAt
 		),
+		statusLeaseExpiresAtIdx: index(
+			"autonomous_tasks_status_lease_expires_at_idx"
+		).on(table.status, table.leaseExpiresAt),
 
 		workflowStepIdx: index("autonomous_tasks_workflow_step_idx").on(
 			table.workflowId,

@@ -1,4 +1,8 @@
 import { env } from "../../env";
+import {
+	classifyWhatsAppHttpError,
+	WhatsAppSendError,
+} from "./whatsapp-errors";
 import type {
 	WhatsAppReplyButton,
 	WhatsAppSendMessageResponse,
@@ -63,23 +67,24 @@ export class WhatsAppClient {
 					statusText: response.statusText,
 					to,
 				});
-				throw new Error(
-					`WhatsApp API HTTP ${response.status}: ${response.statusText}`
-				);
+				throw classifyWhatsAppHttpError(response.status, errorData);
 			}
 
 			const data = (await response.json()) as WhatsAppSendMessageResponse;
 			return data;
 		} catch (error) {
-			if (error instanceof Error && error.message.startsWith("WhatsApp API")) {
+			if (error instanceof WhatsAppSendError) {
 				throw error;
 			}
 			console.error(
 				"[WhatsAppClient] Network error when sending message:",
 				error
 			);
-			throw new Error("Failed to send WhatsApp message due to network error", {
+			// biome-ignore lint/style/useErrorCause: cause is forwarded to ErrorOptions by WhatsAppSendError
+			throw new WhatsAppSendError({
 				cause: error,
+				kind: "uncertain",
+				message: "Failed to send WhatsApp message due to network error",
 			});
 		}
 	}
@@ -131,22 +136,23 @@ export class WhatsAppClient {
 					statusText: response.statusText,
 					to,
 				});
-				throw new Error(
-					`WhatsApp API HTTP ${response.status}: ${response.statusText}`
-				);
+				throw classifyWhatsAppHttpError(response.status, errorData);
 			}
 
 			return (await response.json()) as WhatsAppSendMessageResponse;
 		} catch (error) {
-			if (error instanceof Error && error.message.startsWith("WhatsApp API")) {
+			if (error instanceof WhatsAppSendError) {
 				throw error;
 			}
 			console.error(
 				"[WhatsAppClient] Network error when sending message:",
 				error
 			);
-			throw new Error("Failed to send WhatsApp message due to network error", {
+			// biome-ignore lint/style/useErrorCause: cause is forwarded to ErrorOptions by WhatsAppSendError
+			throw new WhatsAppSendError({
 				cause: error,
+				kind: "uncertain",
+				message: "Failed to send WhatsApp message due to network error",
 			});
 		}
 	}

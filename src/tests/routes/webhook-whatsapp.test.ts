@@ -32,7 +32,7 @@ import { webhookWhatsApp } from "../../routes/whatsapp/webhook-whatsapp";
 import { SchedulingAvailabilityService } from "../../services/calendar/scheduling-availability";
 import { SchedulingChoiceService } from "../../services/calendar/scheduling-choice-service";
 import { SchedulingConfirmationOrchestrator } from "../../services/calendar/scheduling-confirmation-orchestrator";
-import { messageDebounceCoordinator } from "../../services/conversations/receive-customer-message";
+import { drainConversationWork } from "../../services/reliability/background-workers";
 
 function buildApp() {
 	const app = fastify().withTypeProvider<ZodTypeProvider>();
@@ -300,7 +300,7 @@ test("POST /webhooks/whatsapp - fluxo completo: lead, conversation, inbound, deb
 		"Quero saber sobre consórcio de imóveis"
 	);
 
-	await messageDebounceCoordinator.flush(createdConversation.id);
+	await drainConversationWork(createdConversation.id);
 
 	assert.equal(outboundSentTo, testPhone);
 
@@ -393,7 +393,7 @@ test("POST /webhooks/whatsapp - fluxo completo: lead, conversation, inbound, deb
 
 	assert.equal(response2.statusCode, 200);
 
-	await messageDebounceCoordinator.flush(createdConversation.id);
+	await drainConversationWork(createdConversation.id);
 
 	const allLeadsForPhone = await db
 		.select()
@@ -532,6 +532,8 @@ test("POST /webhooks/whatsapp - button_reply duplicado é ignorado após a prime
 		});
 
 		assert.equal(firstResponse.statusCode, 200);
+
+		await drainConversationWork(conversation.id);
 
 		const duplicateResponse = await app.inject({
 			headers: {
@@ -688,7 +690,7 @@ test("POST /webhooks/whatsapp - eventos falhados são recuperados atomicamente e
 		.limit(1);
 
 	assert.ok(conversation, "a conversa deve existir após o reprocessamento");
-	await messageDebounceCoordinator.flush(conversation.id);
+	await drainConversationWork(conversation.id);
 
 	assert.equal(
 		sendCount,
@@ -817,7 +819,7 @@ test("POST /webhooks/whatsapp - processamento com lease expirado é recuperado e
 		conversation,
 		"a conversa deve existir após a recuperação do lease expirado"
 	);
-	await messageDebounceCoordinator.flush(conversation.id);
+	await drainConversationWork(conversation.id);
 
 	assert.equal(
 		sendCount,
@@ -997,6 +999,8 @@ test("POST /webhooks/whatsapp - button_reply válido envia confirmação com Con
 
 		assert.equal(response.statusCode, 200);
 
+		await drainConversationWork(conversation.id);
+
 		assert.deepEqual(receivedChoiceInput, {
 			buttonId,
 			conversationId: conversation.id,
@@ -1171,6 +1175,8 @@ test("POST /webhooks/whatsapp - button_reply rejeitado pelo SchedulingChoiceServ
 		});
 
 		assert.equal(response.statusCode, 200);
+
+		await drainConversationWork(conversation.id);
 
 		assert.deepEqual(receivedChoiceInput, {
 			buttonId,
@@ -1365,6 +1371,8 @@ test("POST /webhooks/whatsapp - botão Confirmar cria appointment e envia confir
 
 		assert.equal(response.statusCode, 200);
 
+		await drainConversationWork(conversation.id);
+
 		assert.deepEqual(receivedConfirmationInput, {
 			buttonId: `confirm:${slotId}`,
 			conversationId: conversation.id,
@@ -1508,7 +1516,7 @@ test("POST /webhooks/whatsapp - oferta de agenda envia os slots persistidos como
 			url: "/webhooks/whatsapp",
 		});
 		assert.equal(response.statusCode, 200);
-		await messageDebounceCoordinator.flush(conversation.id);
+		await drainConversationWork(conversation.id);
 
 		const [session] = await db
 			.select()

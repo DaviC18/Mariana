@@ -4,6 +4,7 @@ import crypto from "node:crypto";
 import test from "node:test";
 
 import { WhatsAppClient } from "../../integrations/whatsapp/whatsapp-client";
+import { WhatsAppSendError } from "../../integrations/whatsapp/whatsapp-errors";
 import { WhatsAppService } from "../../integrations/whatsapp/whatsapp-service";
 
 test("WhatsAppClient envia mensagem de texto com sucesso", async (t) => {
@@ -169,9 +170,12 @@ test("WhatsAppClient lança erro amigável em caso de falha na API HTTP", async 
 		async () => {
 			await client.sendTextMessage("5511999999999", "Teste erro");
 		},
-		{
-			message: "WhatsApp API HTTP 401: Unauthorized",
-			name: "Error",
+		(error: unknown) => {
+			assert.ok(error instanceof WhatsAppSendError);
+			assert.equal(error.kind, "permanent");
+			assert.equal(error.httpStatus, 401);
+			assert.equal(error.retryable, false);
+			return true;
 		}
 	);
 });
@@ -196,7 +200,12 @@ test("WhatsAppClient mantém o erro HTTP ao enviar Reply Buttons", async (t) => 
 				[{ id: "schedule:slot:1", title: "25/09 às 14:00" }]
 			);
 		},
-		{ message: "WhatsApp API HTTP 401: Unauthorized", name: "Error" }
+		(error: unknown) => {
+			assert.ok(error instanceof WhatsAppSendError);
+			assert.equal(error.kind, "permanent");
+			assert.equal(error.httpStatus, 401);
+			return true;
+		}
 	);
 });
 

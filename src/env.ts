@@ -17,6 +17,7 @@ const parseIntegerEnv = (value: string | undefined, fallback: number) => {
 };
 
 export const envSchema = z.object({
+	AUTONOMOUS_TASK_POLL_MS: z.coerce.number().int().positive().default(2000),
 	DATABASE_URL: z
 		.string()
 		.min(1)
@@ -37,7 +38,9 @@ export const envSchema = z.object({
 	NODE_ENV: z
 		.enum(["development", "production", "test"])
 		.default("development"),
+	OUTBOUND_MESSAGE_POLL_MS: z.coerce.number().int().positive().default(2000),
 	PORT: z.coerce.number().default(3252),
+	RELIABILITY_WORKERS_ENABLED: z.enum(["true", "false"]).default("true"),
 	SCHEDULE_CONFIRMATION_MINUTES: z.coerce
 		.number()
 		.int()
@@ -56,6 +59,10 @@ export type Env = z.infer<typeof envSchema>;
 
 export function buildEnvInput(source: NodeJS.ProcessEnv) {
 	return {
+		AUTONOMOUS_TASK_POLL_MS: parseIntegerEnv(
+			source.AUTONOMOUS_TASK_POLL_MS,
+			2000
+		),
 		DATABASE_URL: source.DATABASE_URL,
 		GEMINI_API_KEY: source.GEMINI_API_KEY,
 		GOOGLE_ACCOUNT_EMAIL: source.GOOGLE_ACCOUNT_EMAIL,
@@ -68,7 +75,12 @@ export function buildEnvInput(source: NodeJS.ProcessEnv) {
 		META_ADS_GRAPH_API_VERSION: source.META_ADS_GRAPH_API_VERSION,
 		META_ADS_VERIFY_TOKEN: source.META_ADS_VERIFY_TOKEN,
 		NODE_ENV: source.NODE_ENV,
+		OUTBOUND_MESSAGE_POLL_MS: parseIntegerEnv(
+			source.OUTBOUND_MESSAGE_POLL_MS,
+			2000
+		),
 		PORT: parseIntegerEnv(source.PORT, 3252),
+		RELIABILITY_WORKERS_ENABLED: source.RELIABILITY_WORKERS_ENABLED,
 		SCHEDULE_CONFIRMATION_MINUTES: parseIntegerEnv(
 			source.SCHEDULE_CONFIRMATION_MINUTES,
 			60

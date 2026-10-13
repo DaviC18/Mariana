@@ -22,6 +22,10 @@ export {
 } from "./schema/leads";
 export { messageRole, messages } from "./schema/messages";
 export {
+	outboundMessageStatus,
+	outboundMessages,
+} from "./schema/outbound-messages";
+export {
 	schedulingSessionStatus,
 	schedulingSessions,
 } from "./schema/scheduling-sessions";

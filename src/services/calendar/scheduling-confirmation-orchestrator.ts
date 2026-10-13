@@ -71,6 +71,7 @@ export class SchedulingConfirmationOrchestrator {
 				await this.appointmentService.createConfirmedAppointment({
 					consultantId: confirmationResult.slot.consultantId,
 					endAt: confirmationResult.slot.endAt,
+					idempotencyKey: `appointment:${confirmationResult.session.id}:${confirmationResult.slot.id}`,
 					leadId: input.leadId,
 					now: input.now,
 					schedulingSessionId: confirmationResult.session.id,

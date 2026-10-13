@@ -30,6 +30,10 @@ export const messages = pgTable(
 		role: messageRole().notNull(),
 		content: text().notNull(),
 		externalId: text(),
+		// Marca quando a mensagem de entrada foi efetivamente processada pelo
+		// worker durável. Mensagens com processedAt nulo ainda precisam de
+		// processamento e são recuperadas após restart.
+		processedAt: timestamp({ withTimezone: true }),
 		createdAt: timestamp({ withTimezone: true }).notNull().defaultNow(),
 	},
 	(table) => ({
@@ -37,6 +41,9 @@ export const messages = pgTable(
 			table.conversationId,
 			table.createdAt
 		),
+		conversationUnprocessedIdx: index("messages_conversation_unprocessed_idx")
+			.on(table.conversationId, table.createdAt)
+			.where(sql`${table.processedAt} IS NULL`),
 		externalIdIdx: index("messages_external_id_idx").on(table.externalId),
 		externalIdUniqueIdx: uniqueIndex("messages_external_id_unique_idx")
 			.on(table.externalId)

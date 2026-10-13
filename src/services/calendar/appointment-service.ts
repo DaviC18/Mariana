@@ -19,6 +19,7 @@ import { expireSchedulingSessionIfOverdue } from "./scheduling-session-expiratio
 export interface CreateAppointmentInput {
 	consultantId: string;
 	endAt: Date;
+	idempotencyKey?: string;
 	leadId: string;
 	now?: Date;
 	schedulingSessionId?: string;
@@ -127,6 +128,39 @@ export class AppointmentService {
 		input: CreateAppointmentInput
 	): Promise<CreatedAppointment> {
 		const now = input.now ?? new Date();
+
+		// Idempotência de negócio: se a operação lógica já produziu um
+		// agendamento, devolve o existente sem recriar evento no calendário.
+		if (input.idempotencyKey) {
+			const [existingAppointment] = await db
+				.select({
+					consultantId: appointments.consultantId,
+					endAt: appointments.endAt,
+					externalEventId: appointments.externalEventId,
+					id: appointments.id,
+					startAt: appointments.startAt,
+				})
+				.from(appointments)
+				.where(eq(appointments.idempotencyKey, input.idempotencyKey))
+				.limit(1);
+
+			if (existingAppointment) {
+				return {
+					appointmentId: existingAppointment.id,
+					calendarEvent: {
+						end: existingAppointment.endAt.toISOString(),
+						id: existingAppointment.externalEventId,
+						start: existingAppointment.startAt.toISOString(),
+					},
+					consultantId: existingAppointment.consultantId,
+					endAt: existingAppointment.endAt,
+					externalEventId: existingAppointment.externalEventId,
+					startAt: existingAppointment.startAt,
+					status: "confirmed",
+				};
+			}
+		}
+
 		if (input.startAt >= input.endAt) {
 			throw new AppointmentServiceError(
 				"invalid_time_range",
@@ -282,6 +316,7 @@ export class AppointmentService {
 						consultantId: input.consultantId,
 						endAt: input.endAt,
 						externalEventId: calendarEvent.id,
+						idempotencyKey: input.idempotencyKey ?? null,
 						leadId: input.leadId,
 						startAt: input.startAt,
 						status: "confirmed",

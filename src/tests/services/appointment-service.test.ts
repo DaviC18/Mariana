@@ -829,3 +829,69 @@ test("descarta o evento se a sessão fechar durante a criação no Calendar", as
 		await cleanupSchedulingFixture(fixture);
 	}
 });
+
+test("replay com a mesma idempotencyKey não cria novo evento nem duplica appointment", async () => {
+	const [consultant] = await db
+		.select({
+			calendarId: consultants.calendarId,
+			id: consultants.id,
+			name: consultants.name,
+		})
+		.from(consultants)
+		.where(eq(consultants.active, true))
+		.limit(1);
+
+	assert.ok(consultant);
+
+	const [lead] = await db
+		.insert(leads)
+		.values({
+			consortiumType: "geral",
+			name: "Lead Teste Idempotência",
+			objective: "Teste replay de agendamento",
+			phone: `551199${Date.now().toString().slice(-8)}`,
+			status: "qualified",
+		})
+		.returning({ id: leads.id });
+
+	assert.ok(lead);
+
+	const startAt = new Date("2035-02-01T13:00:00.000Z");
+	const endAt = new Date("2035-02-01T13:30:00.000Z");
+	const idempotencyKey = `appointment:test:${Date.now()}`;
+
+	const calendarService = createMockGoogleCalendarService();
+	const service = new AppointmentService(calendarService);
+
+	try {
+		const first = await service.createConfirmedAppointment({
+			consultantId: consultant.id,
+			endAt,
+			idempotencyKey,
+			leadId: lead.id,
+			startAt,
+		});
+
+		const second = await service.createConfirmedAppointment({
+			consultantId: consultant.id,
+			endAt,
+			idempotencyKey,
+			leadId: lead.id,
+			startAt,
+		});
+
+		assert.equal(second.appointmentId, first.appointmentId);
+		assert.equal(second.externalEventId, first.externalEventId);
+		assert.equal(calendarService.getCallCounts().createEventCalls, 1);
+
+		const savedAppointments = await db
+			.select({ id: appointments.id })
+			.from(appointments)
+			.where(eq(appointments.idempotencyKey, idempotencyKey));
+
+		assert.equal(savedAppointments.length, 1);
+	} finally {
+		await db.delete(appointments).where(eq(appointments.leadId, lead.id));
+		await db.delete(leads).where(eq(leads.id, lead.id));
+	}
+});
