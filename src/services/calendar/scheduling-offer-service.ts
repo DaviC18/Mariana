@@ -7,6 +7,8 @@ import {
 	schedulingSessions,
 	schedulingSlots,
 } from "../../db/schema";
+import { enqueueTask } from "../../routes/whatsapp/webhook-whatsapp";
+import { SEND_CONSULTANT_PREFERENCE_QUESTION_TASK } from "../../services/conversations/autonomous-task-handlers";
 import type { ConsultantAvailableSlot } from "./consultant-availability";
 
 export interface PersistSchedulingOfferParams {
@@ -97,7 +99,7 @@ export class SchedulingOfferService {
 					)
 				);
 
-			// 3. Criar a nova session active
+			// 3. Criar a nova session active com workflowStage inicial
 			const [createdSession] = await tx
 				.insert(schedulingSessions)
 				.values({
@@ -107,6 +109,7 @@ export class SchedulingOfferService {
 					leadId,
 					status: "active",
 					updatedAt: now,
+					workflowStage: "awaiting_availability",
 				})
 				.returning();
 
@@ -114,7 +117,7 @@ export class SchedulingOfferService {
 				throw new Error("Failed to create scheduling session");
 			}
 
-			// 3. Criar os slots ofertados
+			// 4. Criar os slots ofertados
 			const slotsToInsert = offeredSlots.map((slot, index) => ({
 				calendarId: slot.consultant.calendarId,
 				consultantId: slot.consultant.id,
@@ -130,24 +133,9 @@ export class SchedulingOfferService {
 				.insert(schedulingSlots)
 				.values(slotsToInsert)
 				.returning();
+			const session = createdSession;
 
-			const [session] =
-				createdSlots.length === 1
-					? await tx
-							.update(schedulingSessions)
-							.set({
-								selectedSlotId: createdSlots[0]?.id,
-								updatedAt: now,
-							})
-							.where(eq(schedulingSessions.id, createdSession.id))
-							.returning()
-					: [createdSession];
-
-			if (!session) {
-				throw new Error("Failed to select the only scheduling slot");
-			}
-
-			// 4. Atualizar a mensagem assistente existente com finalReply
+			// 5. Atualizar a mensagem assistente existente com finalReply
 			const [updatedAssistantMessage] = await tx
 				.update(messages)
 				.set({
@@ -160,7 +148,7 @@ export class SchedulingOfferService {
 				throw new Error("Assistant message not found for update");
 			}
 
-			// 5. Atualizar conversation updatedAt para consistência
+			// 6. Atualizar conversation updatedAt para consistência
 			await tx
 				.update(conversations)
 				.set({
@@ -173,6 +161,31 @@ export class SchedulingOfferService {
 				slots: createdSlots,
 				updatedAssistantMessage,
 			};
+		});
+	}
+
+	/**
+	 * Enfileira a tarefa para enviar a pergunta de preferência de consultor
+	 * após a oferta de agendamento ser persistida.
+	 */
+	async enqueueConsultantPreferenceQuestion({
+		conversationId,
+		schedulingSessionId,
+		eventId,
+	}: {
+		conversationId: string;
+		schedulingSessionId: string;
+		eventId?: string;
+	}): Promise<void> {
+		await enqueueTask({
+			conversationId,
+			idempotencyKey: `consultant-preference-question:${schedulingSessionId}`,
+			payload: {
+				eventId,
+				kind: "send_consultant_preference_question",
+				schedulingSessionId,
+			},
+			taskType: SEND_CONSULTANT_PREFERENCE_QUESTION_TASK,
 		});
 	}
 }

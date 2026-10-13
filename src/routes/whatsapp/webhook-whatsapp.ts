@@ -19,12 +19,16 @@ import { whatsAppService } from "../../integrations/whatsapp/whatsapp-service";
 import type { WhatsAppWebhookPayload } from "../../integrations/whatsapp/whatsapp-types";
 import {
 	PROCESS_BUTTON_REPLY_TASK,
+	PROCESS_CONSULTANT_PREFERENCE_REPLY_TASK,
+	PROCESS_CONSULTANT_SELECTION_TASK,
 	PROCESS_INBOUND_MESSAGE_TASK,
+	SEND_CONFIRMATION_REQUEST_TASK,
 } from "../../services/conversations/autonomous-task-handlers";
 import { isOptOutRequest } from "../../services/conversations/whatsapp-compliance";
 import { leadIngestionService } from "../../services/leads/lead-ingestion";
 
 const WHATSAPP_WEBHOOK_EVENT_LEASE_MS = 60_000;
+const SCHEDULING_SLOT_BUTTON_ID = /^[\da-f]{8}-(?:[\da-f]{4}-){3}[\da-f]{12}$/i;
 
 async function recoverStaleProcessingWebhookEvents() {
 	const now = new Date();
@@ -122,7 +126,7 @@ async function claimWhatsAppWebhookEvent({
 	return { duplicate: true as const, event: existingEvent };
 }
 
-async function enqueueTask({
+export async function enqueueTask({
 	conversationId,
 	idempotencyKey,
 	payload,
@@ -324,6 +328,21 @@ export const webhookWhatsApp: FastifyPluginCallbackZod = (app, _opts, done) => {
 								})
 								.where(eq(conversations.id, conversation.id));
 
+							// Determinar o tipo de tarefa baseado no prefixo do buttonId
+							let taskType = PROCESS_BUTTON_REPLY_TASK;
+							if (buttonId.startsWith("pref:")) {
+								taskType = PROCESS_CONSULTANT_PREFERENCE_REPLY_TASK;
+							} else if (buttonId.startsWith("consultant:")) {
+								taskType = PROCESS_CONSULTANT_SELECTION_TASK;
+							} else if (
+								buttonId.startsWith("confirm:") ||
+								buttonId.startsWith("cancel:")
+							) {
+								taskType = PROCESS_BUTTON_REPLY_TASK;
+							} else if (SCHEDULING_SLOT_BUTTON_ID.test(buttonId)) {
+								taskType = SEND_CONFIRMATION_REQUEST_TASK;
+							}
+
 							await enqueueTask({
 								conversationId: conversation.id,
 								idempotencyKey: `button-reply:${externalId}`,
@@ -333,7 +352,7 @@ export const webhookWhatsApp: FastifyPluginCallbackZod = (app, _opts, done) => {
 									eventId: event.id,
 									kind: "button_reply",
 								},
-								taskType: PROCESS_BUTTON_REPLY_TASK,
+								taskType,
 							});
 						} else if (content) {
 							const [insertedMessage] = await db

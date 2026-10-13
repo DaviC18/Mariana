@@ -18,6 +18,7 @@ import {
 } from "../../db/schema";
 import type { ConsultantAvailableSlot } from "../../services/calendar/consultant-availability";
 import { SchedulingAvailabilityService } from "../../services/calendar/scheduling-availability";
+import { SchedulingConfirmationService } from "../../services/calendar/scheduling-confirmation-service";
 import { generateMarianaResponse } from "../../services/conversations/generateMarianaResponse";
 
 test.after(async () => {
@@ -762,10 +763,28 @@ test("Etapa 10 — oferta estruturada com exatamente 1 slot", async () => {
 
 	assert.equal(
 		persistedSession.selectedSlotId,
-		persistedSlots[0].id,
-		"O único slot deve ser selecionado antes da confirmação direta"
+		null,
+		"O slot não deve ser selecionado automaticamente"
 	);
 
+	assert.equal(
+		persistedSession.workflowStage,
+		"awaiting_availability",
+		"A sessão deve aguardar o processamento da tarefa de preferência"
+	);
+
+	const confirmation =
+		await new SchedulingConfirmationService().resolveConfirmation({
+			buttonId: `confirm:${persistedSlots[0].id}`,
+			conversationId: conversation.id,
+			leadId: lead.id,
+		});
+
+	assert.equal(
+		confirmation.ok,
+		false,
+		"Não deve aceitar confirmação antes da seleção do slot"
+	);
 	assert.equal(
 		result.schedulingOffer.slots[0].consultantId,
 		offeredSlot.consultant.id

@@ -9,6 +9,7 @@ import {
 	uuid,
 } from "drizzle-orm/pg-core";
 
+import { consultants } from "./consultants";
 import { conversations } from "./conversations";
 import { leads } from "./leads";
 import { schedulingSlots } from "./scheduling-slots";
@@ -18,6 +19,19 @@ export const schedulingSessionStatus = pgEnum("scheduling_session_status", [
 	"closed",
 	"expired",
 ]);
+
+export const schedulingSessionWorkflowStage = pgEnum(
+	"scheduling_session_workflow_stage",
+	[
+		"awaiting_availability",
+		"awaiting_consultant_preference",
+		"awaiting_consultant_selection",
+		"awaiting_slot_selection",
+		"awaiting_confirmation",
+		"completed",
+		"cancelled",
+	]
+);
 
 export const schedulingSessions = pgTable(
 	"scheduling_sessions",
@@ -36,7 +50,13 @@ export const schedulingSessions = pgTable(
 		selectedSlotId: uuid().references(() => schedulingSlots.id, {
 			onDelete: "set null",
 		}),
+		preferredConsultantId: uuid().references(() => consultants.id, {
+			onDelete: "set null",
+		}),
 		status: schedulingSessionStatus().notNull().default("active"),
+		workflowStage: schedulingSessionWorkflowStage()
+			.notNull()
+			.default("awaiting_availability"),
 		createdAt: timestamp({ withTimezone: true }).notNull().defaultNow(),
 		expiresAt: timestamp({ withTimezone: true }).notNull(),
 		updatedAt: timestamp({ withTimezone: true }).notNull().defaultNow(),
@@ -47,6 +67,9 @@ export const schedulingSessions = pgTable(
 			table.conversationId
 		),
 		statusIdx: index("scheduling_sessions_status_idx").on(table.status),
+		workflowStageIdx: index("scheduling_sessions_workflow_stage_idx").on(
+			table.workflowStage
+		),
 		selectedSlotIdIdx: index("scheduling_sessions_selected_slot_id_idx").on(
 			table.selectedSlotId
 		),

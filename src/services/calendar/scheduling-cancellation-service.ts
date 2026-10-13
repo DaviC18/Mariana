@@ -100,6 +100,7 @@ export class SchedulingCancellationService {
 				.set({
 					selectedSlotId: null,
 					updatedAt: now,
+					workflowStage: "awaiting_slot_selection",
 				})
 				.where(
 					and(
@@ -134,6 +135,7 @@ export class SchedulingCancellationService {
 				selectedSlotId: null,
 				status: "closed",
 				updatedAt: now,
+				workflowStage: "cancelled",
 			})
 			.where(
 				and(

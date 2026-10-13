@@ -72,6 +72,7 @@ async function createFixture() {
 			leadId: lead.id,
 			conversationId: conversation.id,
 			status: "active",
+			workflowStage: "awaiting_slot_selection",
 			expiresAt,
 		})
 		.returning();

@@ -74,6 +74,7 @@ async function createFixture() {
 			leadId: lead.id,
 			status: "active",
 			updatedAt: now,
+			workflowStage: "awaiting_confirmation",
 		})
 		.returning();
 

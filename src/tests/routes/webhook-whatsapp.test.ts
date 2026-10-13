@@ -425,6 +425,9 @@ test("POST /webhooks/whatsapp - button_reply duplicado é ignorado após a prime
 
 	const buttonId = crypto.randomUUID();
 	const sessionId = crypto.randomUUID();
+	const slotId = crypto.randomUUID();
+	const startAt = new Date("2026-09-29T10:00:00-03:00");
+	const endAt = new Date("2026-09-29T10:30:00-03:00");
 
 	let choiceCalls = 0;
 
@@ -477,6 +480,46 @@ test("POST /webhooks/whatsapp - button_reply duplicado é ignorado após a prime
 		.returning();
 
 	assert.ok(conversation);
+
+	const [consultant] = await db
+		.select()
+		.from(consultants)
+		.where(eq(consultants.active, true))
+		.limit(1);
+	assert.ok(consultant);
+
+	const [session] = await db
+		.insert(schedulingSessions)
+		.values({
+			conversationId: conversation.id,
+			expiresAt: new Date(Date.now() + 15 * 60 * 1000),
+			id: sessionId,
+			leadId: lead.id,
+			status: "active",
+			workflowStage: "awaiting_slot_selection",
+		})
+		.returning();
+	assert.ok(session);
+
+	const [slot] = await db
+		.insert(schedulingSlots)
+		.values({
+			calendarId: consultant.calendarId,
+			consultantId: consultant.id,
+			consultantName: consultant.name,
+			endAt,
+			id: slotId,
+			position: 1,
+			schedulingSessionId: session.id,
+			startAt,
+		})
+		.returning();
+	assert.ok(slot);
+
+	await db
+		.update(schedulingSessions)
+		.set({ selectedSlotId: slot.id })
+		.where(eq(schedulingSessions.id, session.id));
 
 	const payload = JSON.stringify({
 		entry: [
@@ -552,6 +595,9 @@ test("POST /webhooks/whatsapp - button_reply duplicado é ignorado após a prime
 			"o mesmo buttonReply não deve ser processado duas vezes"
 		);
 	} finally {
+		await db
+			.delete(schedulingSessions)
+			.where(eq(schedulingSessions.id, session.id));
 		await db.delete(conversations).where(eq(conversations.id, conversation.id));
 		await db.delete(leads).where(eq(leads.id, lead.id));
 	}
@@ -850,12 +896,7 @@ test("POST /webhooks/whatsapp - button_reply válido envia confirmação com Con
 		.toString(36)
 		.slice(7)}`;
 
-	const buttonId = crypto.randomUUID();
-	const sessionId = crypto.randomUUID();
-
-	let receivedChoiceInput:
-		| Parameters<SchedulingChoiceService["resolveChoice"]>[0]
-		| undefined;
+	let buttonId: string;
 
 	let outboundSentTo: string | undefined;
 
@@ -868,26 +909,8 @@ test("POST /webhooks/whatsapp - button_reply válido envia confirmação com Con
 		  }>
 		| undefined;
 
-	const originalResolveChoice = SchedulingChoiceService.prototype.resolveChoice;
-
 	const originalSendReplyButtonsMessage =
 		WhatsAppService.prototype.sendReplyButtonsMessage;
-
-	SchedulingChoiceService.prototype.resolveChoice = async (input) => {
-		receivedChoiceInput = input;
-
-		return {
-			ok: true,
-			session: {
-				id: sessionId,
-			},
-			slot: {
-				consultantName: "João Silva",
-				id: buttonId,
-				startAt: new Date("2026-09-29T10:00:00-03:00"),
-			},
-		} as Awaited<ReturnType<SchedulingChoiceService["resolveChoice"]>>;
-	};
 
 	WhatsAppService.prototype.sendReplyButtonsMessage = async (
 		to,
@@ -915,8 +938,6 @@ test("POST /webhooks/whatsapp - button_reply válido envia confirmação com Con
 	};
 
 	t.after(() => {
-		SchedulingChoiceService.prototype.resolveChoice = originalResolveChoice;
-
 		WhatsAppService.prototype.sendReplyButtonsMessage =
 			originalSendReplyButtonsMessage;
 	});
@@ -941,6 +962,40 @@ test("POST /webhooks/whatsapp - button_reply válido envia confirmação com Con
 		.returning();
 
 	assert.ok(conversation);
+
+	const [consultant] = await db
+		.select()
+		.from(consultants)
+		.where(eq(consultants.active, true))
+		.limit(1);
+	assert.ok(consultant);
+
+	const [session] = await db
+		.insert(schedulingSessions)
+		.values({
+			conversationId: conversation.id,
+			expiresAt: new Date(Date.now() + 15 * 60 * 1000),
+			leadId: lead.id,
+			status: "active",
+			workflowStage: "awaiting_slot_selection",
+		})
+		.returning();
+	assert.ok(session);
+
+	const [slot] = await db
+		.insert(schedulingSlots)
+		.values({
+			calendarId: consultant.calendarId,
+			consultantId: consultant.id,
+			consultantName: consultant.name,
+			endAt: new Date("2026-09-29T13:30:00.000Z"),
+			position: 1,
+			schedulingSessionId: session.id,
+			startAt: new Date("2026-09-29T13:00:00.000Z"),
+		})
+		.returning();
+	assert.ok(slot);
+	buttonId = slot.id;
 
 	const payload = JSON.stringify({
 		entry: [
@@ -1001,11 +1056,15 @@ test("POST /webhooks/whatsapp - button_reply válido envia confirmação com Con
 
 		await drainConversationWork(conversation.id);
 
-		assert.deepEqual(receivedChoiceInput, {
-			buttonId,
-			conversationId: conversation.id,
-			leadId: lead.id,
-		});
+		const [updatedSession] = await db
+			.select({
+				selectedSlotId: schedulingSessions.selectedSlotId,
+				workflowStage: schedulingSessions.workflowStage,
+			})
+			.from(schedulingSessions)
+			.where(eq(schedulingSessions.id, session.id));
+		assert.equal(updatedSession?.selectedSlotId, slot.id);
+		assert.equal(updatedSession?.workflowStage, "awaiting_confirmation");
 
 		assert.equal(outboundSentTo, testPhone);
 
@@ -1036,6 +1095,9 @@ test("POST /webhooks/whatsapp - button_reply válido envia confirmação com Con
 			"button_reply não deveria passar pelo receiveCustomerMessage"
 		);
 	} finally {
+		await db
+			.delete(schedulingSessions)
+			.where(eq(schedulingSessions.id, session.id));
 		await db.delete(conversations).where(eq(conversations.id, conversation.id));
 
 		await db.delete(leads).where(eq(leads.id, lead.id));
@@ -1055,27 +1117,10 @@ test("POST /webhooks/whatsapp - button_reply rejeitado pelo SchedulingChoiceServ
 		.toString(36)
 		.slice(7)}`;
 
-	const buttonId = crypto.randomUUID();
-
-	let receivedChoiceInput:
-		| Parameters<SchedulingChoiceService["resolveChoice"]>[0]
-		| undefined;
-
 	let outboundSendCalled = false;
-
-	const originalResolveChoice = SchedulingChoiceService.prototype.resolveChoice;
 
 	const originalSendReplyButtonsMessage =
 		WhatsAppService.prototype.sendReplyButtonsMessage;
-
-	SchedulingChoiceService.prototype.resolveChoice = async (input) => {
-		receivedChoiceInput = input;
-
-		return {
-			ok: false,
-			reason: "expired",
-		};
-	};
 
 	WhatsAppService.prototype.sendReplyButtonsMessage = async () => {
 		outboundSendCalled = true;
@@ -1092,8 +1137,6 @@ test("POST /webhooks/whatsapp - button_reply rejeitado pelo SchedulingChoiceServ
 	};
 
 	t.after(() => {
-		SchedulingChoiceService.prototype.resolveChoice = originalResolveChoice;
-
 		WhatsAppService.prototype.sendReplyButtonsMessage =
 			originalSendReplyButtonsMessage;
 	});
@@ -1118,6 +1161,40 @@ test("POST /webhooks/whatsapp - button_reply rejeitado pelo SchedulingChoiceServ
 		.returning();
 
 	assert.ok(conversation);
+
+	const [consultant] = await db
+		.select()
+		.from(consultants)
+		.where(eq(consultants.active, true))
+		.limit(1);
+	assert.ok(consultant);
+
+	const [session] = await db
+		.insert(schedulingSessions)
+		.values({
+			conversationId: conversation.id,
+			expiresAt: new Date(Date.now() - 1000),
+			leadId: lead.id,
+			status: "active",
+			workflowStage: "awaiting_slot_selection",
+		})
+		.returning();
+	assert.ok(session);
+
+	const [slot] = await db
+		.insert(schedulingSlots)
+		.values({
+			calendarId: consultant.calendarId,
+			consultantId: consultant.id,
+			consultantName: consultant.name,
+			endAt: new Date("2026-09-29T13:30:00.000Z"),
+			position: 1,
+			schedulingSessionId: session.id,
+			startAt: new Date("2026-09-29T13:00:00.000Z"),
+		})
+		.returning();
+	assert.ok(slot);
+	const buttonId = slot.id;
 
 	const payload = JSON.stringify({
 		entry: [
@@ -1178,11 +1255,11 @@ test("POST /webhooks/whatsapp - button_reply rejeitado pelo SchedulingChoiceServ
 
 		await drainConversationWork(conversation.id);
 
-		assert.deepEqual(receivedChoiceInput, {
-			buttonId,
-			conversationId: conversation.id,
-			leadId: lead.id,
-		});
+		const [expiredSession] = await db
+			.select({ status: schedulingSessions.status })
+			.from(schedulingSessions)
+			.where(eq(schedulingSessions.id, session.id));
+		assert.equal(expiredSession?.status, "expired");
 
 		assert.equal(
 			outboundSendCalled,
@@ -1201,6 +1278,9 @@ test("POST /webhooks/whatsapp - button_reply rejeitado pelo SchedulingChoiceServ
 			"button_reply rejeitado não deveria passar pelo fluxo conversacional"
 		);
 	} finally {
+		await db
+			.delete(schedulingSessions)
+			.where(eq(schedulingSessions.id, session.id));
 		await db.delete(conversations).where(eq(conversations.id, conversation.id));
 
 		await db.delete(leads).where(eq(leads.id, lead.id));
@@ -1392,7 +1472,7 @@ test("POST /webhooks/whatsapp - botão Confirmar cria appointment e envia confir
 	}
 });
 
-test("POST /webhooks/whatsapp - oferta de agenda envia os slots persistidos como botões", async (t) => {
+test("POST /webhooks/whatsapp - oferta de agenda pergunta a preferência antes de exibir slots", async (t) => {
 	const app = buildApp();
 	t.after(() => app.close());
 
@@ -1530,14 +1610,15 @@ test("POST /webhooks/whatsapp - oferta de agenda envia os slots persistidos como
 			.where(eq(schedulingSlots.schedulingSessionId, session.id))
 			.limit(1);
 		assert.ok(slot);
-		assert.equal(session.selectedSlotId, slot.id);
+		assert.equal(session.workflowStage, "awaiting_consultant_preference");
+		assert.equal(session.selectedSlotId, null);
 		assert.deepEqual(
 			sentButtons?.map((button) => button.id),
-			[`confirm:${slot.id}`, `cancel:${slot.id}`]
+			[`pref:${session.id}:has_preference`, `pref:${session.id}:no_preference`]
 		);
 		assert.deepEqual(
 			sentButtons?.map((button) => button.title),
-			["Confirmar", "Não"]
+			["Tenho preferência", "Sem preferência"]
 		);
 		const createdAppointments = await db
 			.select()

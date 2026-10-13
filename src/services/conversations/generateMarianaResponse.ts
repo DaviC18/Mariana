@@ -409,6 +409,15 @@ export async function generateMarianaResponse({
 			});
 
 			finalAssistantMessage = schedulingOffer.updatedAssistantMessage;
+
+			if (schedulingOffer.slots.length > 0) {
+				// Uma única opção segue direto para a confirmação já persistida.
+				await schedulingOfferService.enqueueConsultantPreferenceQuestion({
+					conversationId: activeConversation.id,
+					schedulingSessionId: schedulingOffer.session.id,
+					eventId: schedulingOffer.session.id,
+				});
+			}
 		} else {
 			const [updatedAssistantMessage] = await db
 				.update(messages)

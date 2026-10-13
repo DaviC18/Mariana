@@ -12,6 +12,7 @@ export type SchedulingChoiceFailureReason =
 	| "invalid_slot"
 	| "no_active_session"
 	| "expired"
+	| "invalid_workflow_stage"
 	| "slot_not_selected"
 	| "selection_already_made"
 	| "slot_from_another_session";
@@ -106,6 +107,13 @@ export class SchedulingChoiceService {
 			};
 		}
 
+		if (session.workflowStage !== "awaiting_slot_selection") {
+			return {
+				ok: false,
+				reason: "invalid_workflow_stage",
+			};
+		}
+
 		const [selectedSession] = await this.db
 			.update(schedulingSessions)
 			.set({
@@ -118,6 +126,7 @@ export class SchedulingChoiceService {
 					eq(schedulingSessions.leadId, input.leadId),
 					eq(schedulingSessions.conversationId, input.conversationId),
 					eq(schedulingSessions.status, "active"),
+					eq(schedulingSessions.workflowStage, "awaiting_slot_selection"),
 					gt(schedulingSessions.expiresAt, now),
 					or(
 						isNull(schedulingSessions.selectedSlotId),

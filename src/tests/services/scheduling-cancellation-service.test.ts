@@ -16,6 +16,7 @@ import {
 	schedulingSlots,
 } from "../../db/schema";
 import { SchedulingCancellationService } from "../../services/calendar/scheduling-cancellation-service";
+import { SchedulingChoiceService } from "../../services/calendar/scheduling-choice-service";
 
 test.after(async () => {
 	await closeDatabase();
@@ -72,6 +73,7 @@ async function createCancellationFixture(slotCount: number) {
 			expiresAt,
 			leadId: lead.id,
 			status: "active",
+			workflowStage: "awaiting_confirmation",
 		})
 		.returning();
 
@@ -154,11 +156,27 @@ test("Não com 3 slots reapresenta a oferta e mantém a sessão ativa", async ()
 
 		assert.equal(result.action, "reoffer");
 		assert.equal(result.session.status, "active");
+		assert.equal(result.session.workflowStage, "awaiting_slot_selection");
+		assert.equal(result.session.selectedSlotId, null);
 		assert.equal(result.slots.length, 3);
 		assert.deepEqual(
 			result.slots.map((slot) => slot.position),
 			[1, 2, 3]
 		);
+
+		const reselection = await new SchedulingChoiceService().resolveChoice({
+			buttonId: fixture.slots[1].id,
+			conversationId: fixture.conversation.id,
+			leadId: fixture.lead.id,
+		});
+		assert.equal(reselection.ok, true);
+		if (reselection.ok) {
+			assert.equal(
+				reselection.session.workflowStage,
+				"awaiting_slot_selection"
+			);
+			assert.equal(reselection.session.selectedSlotId, fixture.slots[1].id);
+		}
 	} finally {
 		await cleanupFixture({
 			conversationId: fixture.conversation.id,
@@ -187,6 +205,8 @@ test("Não com 2 slots reapresenta a oferta e mantém a sessão ativa", async ()
 
 		assert.equal(result.action, "reoffer");
 		assert.equal(result.session.status, "active");
+		assert.equal(result.session.workflowStage, "awaiting_slot_selection");
+		assert.equal(result.session.selectedSlotId, null);
 		assert.equal(result.slots.length, 2);
 		assert.deepEqual(
 			result.slots.map((slot) => slot.position),
@@ -220,6 +240,7 @@ test("Não com 1 slot fecha a sessão", async () => {
 
 		assert.equal(result.action, "close");
 		assert.equal(result.session.status, "closed");
+		assert.equal(result.session.workflowStage, "cancelled");
 		assert.equal(result.session.selectedSlotId, null);
 		assert.equal(result.slots.length, 1);
 
@@ -230,6 +251,7 @@ test("Não com 1 slot fecha a sessão", async () => {
 
 		assert.ok(storedSession);
 		assert.equal(storedSession.status, "closed");
+		assert.equal(storedSession.workflowStage, "cancelled");
 		assert.equal(storedSession.selectedSlotId, null);
 	} finally {
 		await cleanupFixture({

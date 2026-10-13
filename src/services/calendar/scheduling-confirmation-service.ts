@@ -15,6 +15,7 @@ export type SchedulingConfirmationAction = "confirm" | "cancel";
 export type SchedulingConfirmationFailureReason =
 	| "invalid_action"
 	| "invalid_slot"
+	| "invalid_workflow_stage"
 	| SchedulingChoiceFailureReason;
 
 export type SchedulingConfirmationResult =
@@ -158,6 +159,13 @@ export class SchedulingConfirmationService {
 			return {
 				ok: false,
 				reason: choiceResult.reason,
+			};
+		}
+
+		if (choiceResult.session.workflowStage !== "awaiting_confirmation") {
+			return {
+				ok: false,
+				reason: "invalid_workflow_stage",
 			};
 		}
 
