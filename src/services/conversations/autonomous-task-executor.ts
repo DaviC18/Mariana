@@ -1,14 +1,17 @@
 /** biome-ignore-all lint/style/noNonNullAssertion: <> */
 /** biome-ignore-all lint/performance/noAwaitInLoops: <> */
 import { randomUUID } from "node:crypto";
-import type { InferSelectModel } from "drizzle-orm";
 import { and, eq, sql } from "drizzle-orm";
 
 import { db } from "../../db/connections";
 import { autonomousTasks } from "../../db/schema";
 import { computeRetryBackoffMs } from "../../utils/retry-backoff";
+import {
+	type AutonomousTask,
+	mapAutonomousTaskRow,
+} from "./autonomous-task-row";
 
-export type AutonomousTask = InferSelectModel<typeof autonomousTasks>;
+export type { AutonomousTask } from "./autonomous-task-row";
 
 /**
  * Contexto entregue a um handler. O `leaseToken` identifica a posse atual da
@@ -113,9 +116,9 @@ async function claimNextTask({
     WHERE task."id" = candidate."id"
     RETURNING task.*
   `
-	)) as AutonomousTask[];
+	)) as Record<string, unknown>[];
 
-	return rows[0] as AutonomousTask | undefined;
+	return rows[0] ? mapAutonomousTaskRow(rows[0]) : undefined;
 }
 
 /** Renova o lease da tarefa desde que o token ainda seja o dono. */

@@ -27,6 +27,12 @@ import {
 	SchedulingOfferService,
 } from "../calendar/scheduling-offer-service";
 import type { LeadStatus } from "../leads/lead-status";
+import {
+	buildQualificationFallbackReply,
+	DEFAULT_FALLBACK_REPLY,
+	getMissingQualificationFields,
+	mergeQualificationInput,
+} from "../leads/qualification-gaps";
 import { updateLeadFromAgent } from "../leads/update-lead-from-agent";
 
 type PersistLeadTransactionValues = Partial<InferInsertModel<typeof leads>> & {
@@ -194,11 +200,14 @@ function hasSchedulingCommitment(reply: string): boolean {
 
 export async function persistAuthorizedAssistantReply<AssistantMessage>({
 	actionResult,
+	fallbackReply,
 	requestedAction,
 	persistAssistantMessage,
 	reply,
 }: {
 	actionResult: ExecuteNextActionResult;
+	/** Pergunta usada quando a resposta do modelo é bloqueada. */
+	fallbackReply?: string;
 	persistAssistantMessage: (content: string) => Promise<AssistantMessage>;
 	requestedAction: NextAction;
 	reply: string;
@@ -225,7 +234,7 @@ export async function persistAuthorizedAssistantReply<AssistantMessage>({
 		authorizedReply =
 			actionResult.action === "request_consultant"
 				? COMMERCIAL_HANDOFF
-				: "Posso ajudar com suas dúvidas e entender melhor o que você procura.";
+				: fallbackReply?.trim() || DEFAULT_FALLBACK_REPLY;
 	}
 
 	const assistantMessage = await persistAssistantMessage(authorizedReply);
@@ -336,6 +345,17 @@ export async function generateMarianaResponse({
 	);
 
 	// 5. Contexto do lead
+	const qualificationInput = {
+		birthDate: lead.birthDate,
+		consortiumType: lead.consortiumType,
+		currentSituation: lead.currentSituation,
+		interestedInConsultant: lead.interestedInConsultant,
+		objective: lead.objective,
+		painPoint: lead.painPoint,
+	};
+	const isFirstContact = !previousHistory.some(
+		(message) => message.role === "assistant"
+	);
 	const agentLead = {
 		commercialApproach: lead.commercialApproach,
 		consortiumType: lead.consortiumType ?? "",
@@ -364,9 +384,20 @@ export async function generateMarianaResponse({
 	const response = await generateMarianaReplyFn({
 		businessProfile,
 		currentMessages: agentCurrentMessages,
+		conversationContext: {
+			isFirstContact,
+			missingQualification: getMissingQualificationFields(qualificationInput),
+		},
 		history: agentHistory,
 		lead: agentLead,
 	});
+
+	// Pergunta de fallback considera o que o modelo acabou de extrair nesta rodada.
+	const fallbackReply = buildQualificationFallbackReply(
+		getMissingQualificationFields(
+			mergeQualificationInput(qualificationInput, response.result.leadUpdate)
+		)
+	);
 
 	// 8. Valida regra de negócio antes de persistir qualquer mudança de status
 	const [existingAppointment] = await db
@@ -447,6 +478,7 @@ export async function generateMarianaResponse({
 
 		const preparedResponse = await persistAuthorizedAssistantReply({
 			actionResult: nextActionResult,
+			fallbackReply,
 			persistAssistantMessage: async (content) => {
 				const [assistantMessage] = await tx
 					.insert(messages)

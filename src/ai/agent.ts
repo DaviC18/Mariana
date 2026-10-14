@@ -10,6 +10,10 @@ import {
 	sanitizeCommercialIdentity,
 } from "../services/conversations/mariana-safety";
 import {
+	describeQualificationFields,
+	type QualificationField,
+} from "../services/leads/qualification-gaps";
+import {
 	type BusinessProfile,
 	resolveBusinessProfile,
 } from "./business-profile";
@@ -52,9 +56,15 @@ export interface MarianaLead {
 	urgency: string | null;
 }
 
+export interface MarianaConversationContext {
+	isFirstContact: boolean;
+	missingQualification: QualificationField[];
+}
+
 export interface GenerateMarianaReplyParams {
 	additionalContext?: string;
 	businessProfile?: BusinessProfile;
+	conversationContext?: MarianaConversationContext;
 	currentMessages: MarianaMessage[];
 	history: MarianaMessage[];
 	lead: MarianaLead;
@@ -69,8 +79,46 @@ export interface GenerateMarianaReplyResult {
 	result: MarianaResponse;
 }
 
+export function buildConversationContextSection({
+	isFirstContact,
+	missingQualification,
+}: MarianaConversationContext): string {
+	const greetingRule = isFirstContact
+		? "Este é o primeiro contato da Mariana nesta conversa: cumprimente o cliente uma única vez, de forma breve."
+		: 'A conversa já está em andamento: NÃO cumprimente novamente (sem "Olá", "Oi", "Boa noite" etc.) e vá direto ao ponto.';
+
+	const pendingSection =
+		missingQualification.length > 0
+			? [
+					"Campos de qualificação ainda pendentes, nesta ordem:",
+					...describeQualificationFields(missingQualification).map(
+						(description, index) => `${index + 1}. ${description}`
+					),
+					"",
+					"Enquanto houver qualquer campo pendente, use nextAction `continue_qualification` ou `answer_basic_question`. Nunca use `offer_meeting`, `offer_appointment`, `schedule_meeting` ou `wait_for_schedule`, e não mencione agenda, horários ou reunião no texto.",
+				].join("\n")
+			: "Todos os campos obrigatórios de qualificação já foram preenchidos.";
+
+	return `
+# CONTEXTO DA CONVERSA
+
+${greetingRule}
+
+${pendingSection}
+
+Antes de perguntar algo, confira o histórico: nunca pergunte novamente uma informação que o cliente já respondeu. Se a resposta estiver no histórico ou na mensagem atual, registre-a em \`leadUpdate\` e siga para o próximo campo pendente.
+
+Respostas como "carro", "veículo", "moto", "casa", "apartamento" ou "imóvel" já informam tanto o objetivo quanto o tipo de consórcio. Registre os dois em \`leadUpdate\` e não pergunte nenhum deles de novo.
+
+Faça no máximo uma pergunta por mensagem.
+
+Se o cliente perguntar "o que você me indica?" ou algo parecido, dê uma explicação breve e geral sobre como o consórcio funciona para o objetivo dele, sem recomendar grupo, carta de crédito ou valores, e em seguida faça a próxima pergunta pendente.
+`;
+}
+
 export async function generateMarianaReply({
 	businessProfile,
+	conversationContext,
 	currentMessages,
 	history,
 	lead,
@@ -152,7 +200,7 @@ Urgência: ${lead.urgency ?? "não informada"}
 Situação atual: ${lead.currentSituation ?? "não informada"}
 Abordagem comercial: ${lead.commercialApproach ?? "não informada"}
 Status: ${lead.status}
-${accessInstruction}
+${conversationContext ? buildConversationContextSection(conversationContext) : ""}${accessInstruction}
 `;
 
 	const response = await ai.models.generateContent({

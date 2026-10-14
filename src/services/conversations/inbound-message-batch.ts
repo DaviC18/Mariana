@@ -1,3 +1,5 @@
+import { toDate } from "./autonomous-task-row";
+
 export interface InboundBatchTask {
 	createdAt: Date;
 	id: string;
@@ -23,7 +25,11 @@ export function getInboundBatchCutoffAt(task: InboundBatchTask): Date {
 		}
 	}
 
-	return task.createdAt;
+	return toDate(task.createdAt);
+}
+
+function toTime(value: Date | string): number {
+	return toDate(value).getTime();
 }
 
 export function selectInboundMessageBatch({
@@ -35,6 +41,7 @@ export function selectInboundMessageBatch({
 }): InboundBatchCandidate[] {
 	const cutoffValue = anchorTask.payload.batchCutoffAt;
 	const cutoffAt = getInboundBatchCutoffAt(anchorTask);
+	const anchorTime = toTime(anchorTask.createdAt);
 
 	return candidates
 		.filter((candidate) => {
@@ -42,16 +49,19 @@ export function selectInboundMessageBatch({
 				return true;
 			}
 
+			// Compara por `getTime()`: um timestamp vindo como string de um
+			// `db.execute` cru faria `Date >= string` ser sempre `false`.
+			const candidateTime = toTime(candidate.taskCreatedAt);
 			return (
 				typeof cutoffValue === "string" &&
 				candidate.taskPayload.batchCutoffAt === cutoffValue &&
-				candidate.taskCreatedAt >= anchorTask.createdAt &&
-				candidate.taskCreatedAt <= cutoffAt
+				candidateTime >= anchorTime &&
+				candidateTime <= cutoffAt.getTime()
 			);
 		})
 		.sort((left, right) => {
 			const timeDifference =
-				left.taskCreatedAt.getTime() - right.taskCreatedAt.getTime();
+				toTime(left.taskCreatedAt) - toTime(right.taskCreatedAt);
 			return timeDifference || left.taskId.localeCompare(right.taskId);
 		});
 }

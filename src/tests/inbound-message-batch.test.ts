@@ -135,3 +135,112 @@ test("retry reuses the same batch boundary and reply idempotency key", () => {
 		)
 	);
 });
+
+// Reproduz a divisão observada em produção (conversa 7c251635-...): as duas
+// tarefas tinham o mesmo `batchCutoffAt` e a âncora foi reivindicada depois da
+// extensão, mas a mensagem seguinte foi respondida separadamente. Causa: o
+// claim usa `db.execute(... RETURNING task.*)` e o driver postgres-js do
+// drizzle devolve `timestamptz` como string. A comparação `Date >= string`
+// vira `number >= NaN`, sempre `false`, e toda tarefa não-âncora é descartada.
+test("âncora com createdAt em string do Postgres ainda agrega a mensagem seguinte", () => {
+	const sharedCutoffAt = "2026-10-14T22:13:26.527Z";
+	const rawRowAnchor = {
+		...anchorTask,
+		createdAt: "2026-10-14 22:13:01.939123+00",
+		payload: { batchCutoffAt: sharedCutoffAt },
+	} as unknown as InboundBatchTask;
+
+	const selected = selectInboundMessageBatch({
+		anchorTask: rawRowAnchor,
+		candidates: [
+			candidate({
+				content: "ola Mariana boa noite",
+				createdAt: "2026-10-14T22:13:01.900Z",
+				id: "message-current",
+				taskCreatedAt: "2026-10-14T22:13:01.939Z",
+				taskId: "task-current",
+				taskPayload: { batchCutoffAt: sharedCutoffAt },
+			}),
+			candidate({
+				content: "Meu nome é Davi e eu quero fazer um consorcio",
+				createdAt: "2026-10-14T22:13:11.580Z",
+				id: "message-second",
+				taskCreatedAt: "2026-10-14T22:13:11.604Z",
+				taskId: "task-second",
+				taskPayload: { batchCutoffAt: sharedCutoffAt },
+			}),
+		],
+	});
+
+	assert.deepEqual(
+		selected.map((message) => message.id),
+		["message-current", "message-second"]
+	);
+});
+
+test("tarefa com cutoff diferente do da âncora não entra no batch", () => {
+	const selected = selectInboundMessageBatch({
+		anchorTask: {
+			...anchorTask,
+			payload: { batchCutoffAt: "2026-10-14T12:00:15.000Z" },
+		},
+		candidates: [
+			candidate({
+				content: "ola Mariana boa noite",
+				createdAt: "2026-10-14T12:00:00.000Z",
+				id: "message-current",
+				taskCreatedAt: "2026-10-14T12:00:00.001Z",
+				taskId: "task-current",
+				taskPayload: { batchCutoffAt: "2026-10-14T12:00:15.000Z" },
+			}),
+			candidate({
+				content: "Meu nome é Davi e eu quero fazer um consorcio",
+				createdAt: "2026-10-14T12:00:10.000Z",
+				id: "message-second",
+				taskCreatedAt: "2026-10-14T12:00:10.001Z",
+				taskId: "task-second",
+				taskPayload: { batchCutoffAt: "2026-10-14T12:00:25.000Z" },
+			}),
+		],
+	});
+
+	assert.deepEqual(
+		selected.map((message) => message.id),
+		["message-current"]
+	);
+});
+
+test("batch estendido a tempo agrega as duas mensagens com o mesmo cutoff", () => {
+	const extendedCutoffAt = "2026-10-14T12:00:25.000Z";
+	const extendedAnchor: InboundBatchTask = {
+		...anchorTask,
+		payload: { batchCutoffAt: extendedCutoffAt },
+	};
+
+	const selected = selectInboundMessageBatch({
+		anchorTask: extendedAnchor,
+		candidates: [
+			candidate({
+				content: "ola Mariana boa noite",
+				createdAt: "2026-10-14T12:00:00.000Z",
+				id: "message-current",
+				taskCreatedAt: "2026-10-14T12:00:00.001Z",
+				taskId: "task-current",
+				taskPayload: { batchCutoffAt: extendedCutoffAt },
+			}),
+			candidate({
+				content: "Meu nome é Davi e eu quero fazer um consorcio",
+				createdAt: "2026-10-14T12:00:10.000Z",
+				id: "message-second",
+				taskCreatedAt: "2026-10-14T12:00:10.001Z",
+				taskId: "task-second",
+				taskPayload: { batchCutoffAt: extendedCutoffAt },
+			}),
+		],
+	});
+
+	assert.deepEqual(
+		selected.map((message) => message.id),
+		["message-current", "message-second"]
+	);
+});
