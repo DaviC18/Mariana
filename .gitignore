@@ -19,6 +19,7 @@ node_modules/
 dist/
 build/
 out/
+migration-backup-20261013/
 
 # ==========================================
 # Logs
