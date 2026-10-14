@@ -329,6 +329,7 @@ export async function generateMarianaResponse({
 		const nextActionResult = await executeNextAction({
 			conversationId: activeConversation.id,
 			currentStatus: updatedLeadStatus,
+			currentMessages,
 			leadId,
 			nextAction: response.result.nextAction,
 			persistConversationStatus: async ({

@@ -47,10 +47,38 @@ const ACTION_ALIASES: Record<MarianaNextAction, MarianaResponse["nextAction"]> =
 
 		offer_meeting: "offer_meeting",
 		reject_out_of_scope: "close",
-		request_consultant: "offer_meeting",
+		request_consultant: "request_consultant",
 		schedule_meeting: "schedule_meeting",
 		wait_for_schedule: "schedule_meeting",
 	};
+
+const CURRENT_SCHEDULING_INTENT_PATTERNS = [
+	/\b(?:quero|queria|gostaria(?:\s+de)?|preciso(?:\s+de)?|pretendo|vou|posso|pode(?:ria)?|vamos|desejo)\s+(?:(?:ja|agora)\s+)?(?:agendar|marcar|reservar)\b/,
+	/\b(?:agendar|marcar|reservar)\s+(?:um|uma|o|a)?\s*(?:horario|reuniao|conversa|atendimento|consulta)\b/,
+	/\b(?:ver|consultar|conferir|checar|saber|receber)\s+(?:(?:os?|alguns?)\s+)?(?:horarios?|disponibilidade|agenda)\b/,
+	/\b(?:tem|ha|existe)\s+(?:(?:algum|alguma|um|uma)\s+)?(?:horario|vaga)\s+(?:disponivel|livre|para)\b/,
+	/\b(?:quais|que)\s+(?:(?:sao|estao)\s+)?(?:os?\s+)?horarios?\s+(?:(?:estao|tem|ha)\s+)?(?:disponiveis|livres)\b/,
+];
+
+const NEGATED_SCHEDULING_INTENT_PATTERN =
+	/\b(?:nao|nunca)\s+(?:(?:quero|queria|gostaria(?:\s+de)?|preciso(?:\s+de)?|pretendo|vou|posso)\s+)?(?:agendar|marcar|reservar|ver|consultar|conferir|checar|saber|receber)\b[^.!?]{0,40}\b(?:horarios?|disponibilidade|agenda|reuniao|conversa|atendimento|consulta|vaga)\b|\b(?:nao|nunca)\s+(?:(?:quero|queria|gostaria(?:\s+de)?|preciso(?:\s+de)?|pretendo|vou|posso)\s+)?(?:agendar|marcar|reservar)\b/;
+
+export function hasCurrentSchedulingIntent(currentMessages: string[]): boolean {
+	return currentMessages.some((message) => {
+		const normalizedMessage = message
+			.normalize("NFD")
+			.replace(/[\u0300-\u036f]/g, "")
+			.toLowerCase();
+
+		if (NEGATED_SCHEDULING_INTENT_PATTERN.test(normalizedMessage)) {
+			return false;
+		}
+
+		return CURRENT_SCHEDULING_INTENT_PATTERNS.some((pattern) =>
+			pattern.test(normalizedMessage)
+		);
+	});
+}
 
 export type ExecuteNextActionResult =
 	| {
@@ -59,6 +87,10 @@ export type ExecuteNextActionResult =
 	  }
 	| {
 			action: "offer_meeting";
+			status: "executed";
+	  }
+	| {
+			action: "request_consultant";
 			status: "executed";
 	  }
 	| {
@@ -72,6 +104,7 @@ export type ExecuteNextActionResult =
 
 export interface ExecuteNextActionParams {
 	conversationId: string;
+	currentMessages: string[];
 	currentStatus: string;
 	leadId: string;
 	nextAction: NextAction;
@@ -85,6 +118,7 @@ export interface ExecuteNextActionParams {
 export async function executeNextAction({
 	conversationId,
 	currentStatus,
+	currentMessages,
 	leadId,
 	nextAction,
 	persistConversationStatus = async ({
@@ -135,7 +169,36 @@ export async function executeNextAction({
 		};
 	}
 
+	if (normalizedAction === "request_consultant") {
+		console.info({
+			conversationId: resolvedConversationId,
+			event: "agent_action_executed",
+			leadId,
+			nextAction: normalizedAction,
+		});
+
+		return {
+			action: "request_consultant",
+			status: "executed",
+		};
+	}
+
 	if (normalizedAction === "offer_meeting") {
+		if (!hasCurrentSchedulingIntent(currentMessages)) {
+			console.info({
+				conversationId: resolvedConversationId,
+				event: "agent_action_blocked",
+				leadId,
+				nextAction: normalizedAction,
+				reason: "no_current_scheduling_intent",
+			});
+
+			return {
+				action: "continue_qualification",
+				status: "executed",
+			};
+		}
+
 		if (currentStatus !== "qualified") {
 			console.info({
 				conversationId: resolvedConversationId,
@@ -165,6 +228,21 @@ export async function executeNextAction({
 	}
 
 	if (normalizedAction === "schedule_meeting") {
+		if (!hasCurrentSchedulingIntent(currentMessages)) {
+			console.info({
+				conversationId: resolvedConversationId,
+				event: "agent_action_blocked",
+				leadId,
+				nextAction: normalizedAction,
+				reason: "no_current_scheduling_intent",
+			});
+
+			return {
+				action: "continue_qualification",
+				status: "executed",
+			};
+		}
+
 		if (currentStatus !== "qualified") {
 			console.info({
 				conversationId: resolvedConversationId,
