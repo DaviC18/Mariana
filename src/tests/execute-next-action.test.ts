@@ -208,6 +208,7 @@ test("solicitação negada e pergunta comercial não autorizam agendamento", asy
 	for (const currentMessages of [
 		["Não quero agendar uma conversa"],
 		["Qual é a taxa exata?"],
+		["Pode me passar o horário de funcionamento?"],
 	]) {
 		const result = await executeNextAction({
 			conversationId: "conv-non-scheduling",

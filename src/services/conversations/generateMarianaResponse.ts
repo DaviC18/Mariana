@@ -11,9 +11,14 @@ import {
 	generateMarianaReply,
 } from "../../ai/agent";
 import type { BusinessProfile } from "../../ai/business-profile";
+import { COMMERCIAL_HANDOFF } from "../../ai/knowledge/commercial-policy";
 import { db } from "../../db/connections";
 import { appointments, conversations, leads, messages } from "../../db/schema";
-import { executeNextAction } from "../agent/execute-next-action";
+import {
+	type ExecuteNextActionResult,
+	executeNextAction,
+	type NextAction,
+} from "../agent/execute-next-action";
 import { CONFIRMED_APPOINTMENT_STATUSES } from "../appointments/appointment-status";
 import type { ConsultantAvailableSlot } from "../calendar/consultant-availability";
 import { SchedulingAvailabilityService } from "../calendar/scheduling-availability";
@@ -156,6 +161,92 @@ function formatSchedulingOffer(slots: ConsultantAvailableSlot[]): string {
 		"",
 		"Qual desses horários você prefere?",
 	].join("\n");
+}
+
+const SCHEDULING_COMMITMENT_PATTERNS = [
+	/\b(?:vou|vamos|posso|podemos|irei|consigo)\b.{0,60}\b(?:agendar|marcar|reservar)\b/,
+	/\b(?:vou|vamos|posso|podemos|irei|consigo)\b.{0,60}\b(?:verificar|consultar|checar|buscar|passar|enviar|mostrar)\b.{0,40}\b(?:horarios?|disponibilidade|agenda|vagas?)\b/,
+	/\b(?:tenho|encontrei|separei|reservei|verifiquei)\b.{0,30}\b(?:horarios?|disponibilidade|vagas?)\b/,
+	/\b(?:horarios?|vagas?)\s+(?:disponiveis|livres)\b/,
+	/\b(?:agendado|marcado|reservado)\b/,
+	/\b(?:segue|aqui estao)\b.{0,40}\b(?:horarios?|disponibilidade|agenda|vagas?)\b/,
+];
+
+function requestsSchedulingAction(nextAction: NextAction): boolean {
+	return (
+		nextAction === "offer_meeting" ||
+		nextAction === "offer_appointment" ||
+		nextAction === "schedule_meeting" ||
+		nextAction === "wait_for_schedule"
+	);
+}
+
+function hasSchedulingCommitment(reply: string): boolean {
+	const normalizedReply = reply
+		.normalize("NFD")
+		.replace(/[\u0300-\u036f]/g, "")
+		.toLowerCase();
+
+	return SCHEDULING_COMMITMENT_PATTERNS.some((pattern) =>
+		pattern.test(normalizedReply)
+	);
+}
+
+export async function persistAuthorizedAssistantReply<AssistantMessage>({
+	actionResult,
+	requestedAction,
+	persistAssistantMessage,
+	reply,
+}: {
+	actionResult: ExecuteNextActionResult;
+	persistAssistantMessage: (content: string) => Promise<AssistantMessage>;
+	requestedAction: NextAction;
+	reply: string;
+}): Promise<{
+	actionResult: ExecuteNextActionResult;
+	assistantMessage: AssistantMessage;
+	reply: string;
+	shouldOfferSlots: boolean;
+}> {
+	const shouldOfferSlots =
+		actionResult.action === "offer_meeting" &&
+		actionResult.status === "executed";
+	const schedulingAuthorized =
+		shouldOfferSlots ||
+		(actionResult.action === "schedule_meeting" &&
+			actionResult.status === "pending");
+	let authorizedReply = reply;
+
+	if (
+		!schedulingAuthorized &&
+		(requestsSchedulingAction(requestedAction) ||
+			hasSchedulingCommitment(reply))
+	) {
+		authorizedReply =
+			actionResult.action === "request_consultant"
+				? COMMERCIAL_HANDOFF
+				: "Posso ajudar com suas dúvidas e entender melhor o que você procura.";
+	}
+
+	const assistantMessage = await persistAssistantMessage(authorizedReply);
+
+	return {
+		actionResult,
+		assistantMessage,
+		reply: authorizedReply,
+		shouldOfferSlots,
+	};
+}
+
+export async function runSchedulingOfferIfAuthorized<Result>(
+	shouldOfferSlots: boolean,
+	runSchedulingOffer: () => Promise<Result>
+): Promise<Result | undefined> {
+	if (!shouldOfferSlots) {
+		return undefined;
+	}
+
+	return await runSchedulingOffer();
 }
 
 export async function generateMarianaResponse({
@@ -354,14 +445,27 @@ export async function generateMarianaResponse({
 			},
 		});
 
-		const [assistantMessage] = await tx
-			.insert(messages)
-			.values({
-				content: response.result.reply,
-				conversationId: activeConversation.id,
-				role: "assistant",
-			})
-			.returning();
+		const preparedResponse = await persistAuthorizedAssistantReply({
+			actionResult: nextActionResult,
+			persistAssistantMessage: async (content) => {
+				const [assistantMessage] = await tx
+					.insert(messages)
+					.values({
+						content,
+						conversationId: activeConversation.id,
+						role: "assistant",
+					})
+					.returning();
+
+				if (!assistantMessage) {
+					throw new Error("Assistant message not found");
+				}
+
+				return assistantMessage;
+			},
+			requestedAction: response.result.nextAction,
+			reply: response.result.reply,
+		});
 
 		await tx
 			.update(conversations)
@@ -370,71 +474,71 @@ export async function generateMarianaResponse({
 			})
 			.where(eq(conversations.id, activeConversation.id));
 
-		return { actionResult: nextActionResult, assistantMessage };
+		return preparedResponse;
 	});
 
-	let finalReply = response.result.reply;
+	let finalReply = actionResult.reply;
 	let finalAssistantMessage = actionResult.assistantMessage;
 	let schedulingOffer: PersistSchedulingOfferResult | undefined;
 
-	if (
-		actionResult.actionResult.action === "offer_meeting" &&
-		actionResult.actionResult.status === "executed"
-	) {
-		const timeMin = new Date();
-		const timeMax = new Date(timeMin);
+	await runSchedulingOfferIfAuthorized(
+		actionResult.shouldOfferSlots,
+		async () => {
+			const timeMin = new Date();
+			const timeMax = new Date(timeMin);
 
-		timeMax.setDate(timeMax.getDate() + 5);
+			timeMax.setDate(timeMax.getDate() + 5);
 
-		const slots = await schedulingAvailabilityService.getAvailableSlots({
-			leadId,
-			timeMin,
-			timeMax,
-		});
-
-		const offeredSlots = slots.slice(0, 3);
-
-		finalReply = formatSchedulingOffer(offeredSlots);
-
-		if (!actionResult.assistantMessage) {
-			throw new Error("Assistant message not found");
-		}
-
-		if (offeredSlots.length > 0) {
-			schedulingOffer = await schedulingOfferService.persistOffer({
-				conversationId: activeConversation.id,
-				finalReply,
+			const slots = await schedulingAvailabilityService.getAvailableSlots({
 				leadId,
-				messageId: actionResult.assistantMessage.id,
-				offeredSlots,
+				timeMin,
+				timeMax,
 			});
 
-			finalAssistantMessage = schedulingOffer.updatedAssistantMessage;
+			const offeredSlots = slots.slice(0, 3);
 
-			if (schedulingOffer.slots.length > 0) {
-				// Uma única opção segue direto para a confirmação já persistida.
-				await schedulingOfferService.enqueueConsultantPreferenceQuestion({
-					conversationId: activeConversation.id,
-					schedulingSessionId: schedulingOffer.session.id,
-					eventId: schedulingOffer.session.id,
-				});
-			}
-		} else {
-			const [updatedAssistantMessage] = await db
-				.update(messages)
-				.set({
-					content: finalReply,
-				})
-				.where(eq(messages.id, actionResult.assistantMessage.id))
-				.returning();
+			finalReply = formatSchedulingOffer(offeredSlots);
 
-			if (!updatedAssistantMessage) {
+			if (!actionResult.assistantMessage) {
 				throw new Error("Assistant message not found");
 			}
 
-			finalAssistantMessage = updatedAssistantMessage;
+			if (offeredSlots.length > 0) {
+				schedulingOffer = await schedulingOfferService.persistOffer({
+					conversationId: activeConversation.id,
+					finalReply,
+					leadId,
+					messageId: actionResult.assistantMessage.id,
+					offeredSlots,
+				});
+
+				finalAssistantMessage = schedulingOffer.updatedAssistantMessage;
+
+				if (schedulingOffer.slots.length > 0) {
+					// Uma única opção segue direto para a confirmação já persistida.
+					await schedulingOfferService.enqueueConsultantPreferenceQuestion({
+						conversationId: activeConversation.id,
+						schedulingSessionId: schedulingOffer.session.id,
+						eventId: schedulingOffer.session.id,
+					});
+				}
+			} else {
+				const [updatedAssistantMessage] = await db
+					.update(messages)
+					.set({
+						content: finalReply,
+					})
+					.where(eq(messages.id, actionResult.assistantMessage.id))
+					.returning();
+
+				if (!updatedAssistantMessage) {
+					throw new Error("Assistant message not found");
+				}
+
+				finalAssistantMessage = updatedAssistantMessage;
+			}
 		}
-	}
+	);
 
 	return {
 		actionResult: actionResult.actionResult,

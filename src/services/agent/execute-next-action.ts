@@ -55,13 +55,19 @@ const ACTION_ALIASES: Record<MarianaNextAction, MarianaResponse["nextAction"]> =
 const CURRENT_SCHEDULING_INTENT_PATTERNS = [
 	/\b(?:quero|queria|gostaria(?:\s+de)?|preciso(?:\s+de)?|pretendo|vou|posso|pode(?:ria)?|vamos|desejo)\s+(?:(?:ja|agora)\s+)?(?:agendar|marcar|reservar)\b/,
 	/\b(?:agendar|marcar|reservar)\s+(?:um|uma|o|a)?\s*(?:horario|reuniao|conversa|atendimento|consulta)\b/,
-	/\b(?:ver|consultar|conferir|checar|saber|receber)\s+(?:(?:os?|alguns?)\s+)?(?:horarios?|disponibilidade|agenda)\b/,
-	/\b(?:tem|ha|existe)\s+(?:(?:algum|alguma|um|uma)\s+)?(?:horario|vaga)\s+(?:disponivel|livre|para)\b/,
-	/\b(?:quais|que)\s+(?:(?:sao|estao)\s+)?(?:os?\s+)?horarios?\s+(?:(?:estao|tem|ha)\s+)?(?:disponiveis|livres)\b/,
+	/\b(?:ver|consultar|conferir|checar|saber|receber)\s+(?:(?:os?|alguns?|um|uma)\s+)?(?:horarios?|disponibilidade|agenda|reuniao)\b/,
+	/\b(?:tem|ha|existe)\s+(?:(?:algum|alguma|um|uma)\s+)?(?:horario|horarios|vaga)\s+(?:disponivel|disponiveis|livre|livres|para)\b/,
+	/\b(?:quais|que)\s+(?:(?:sao|estao)\s+)?(?:os?\s+)?horarios?.*(?:disponiveis|disponivel|agenda|livre|livres|reuniao)\b/,
+	/\b(?:passar|enviar|mostrar|dar)\s+(?:(?:os?|alguns?)\s+)?(?:horarios?|disponibilidade|agenda|horario)\b/,
+	/\b(?:pode(?:ria)?|consegue|conseguiria)\b.*(?:passar|mandar|enviar|mostrar|dar)\b.*(?:horarios?|disponibilidade|agenda|horario|reuniao)\b/,
 ];
 
 const NEGATED_SCHEDULING_INTENT_PATTERN =
 	/\b(?:nao|nunca)\s+(?:(?:quero|queria|gostaria(?:\s+de)?|preciso(?:\s+de)?|pretendo|vou|posso)\s+)?(?:agendar|marcar|reservar|ver|consultar|conferir|checar|saber|receber)\b[^.!?]{0,40}\b(?:horarios?|disponibilidade|agenda|reuniao|conversa|atendimento|consulta|vaga)\b|\b(?:nao|nunca)\s+(?:(?:quero|queria|gostaria(?:\s+de)?|preciso(?:\s+de)?|pretendo|vou|posso)\s+)?(?:agendar|marcar|reservar)\b/;
+
+// "horários de funcionamento/pagamento/..." são dúvidas comerciais, não pedido de agendamento.
+const NON_SCHEDULING_HORARIO_PATTERN =
+	/\bhorarios?\s+(?:de|do|da)\s+(?:funcionamento|abertura|fechamento|pagamento|vencimento|contrato|parcela|parcelas)\b/;
 
 export function hasCurrentSchedulingIntent(currentMessages: string[]): boolean {
 	return currentMessages.some((message) => {
@@ -70,7 +76,10 @@ export function hasCurrentSchedulingIntent(currentMessages: string[]): boolean {
 			.replace(/[\u0300-\u036f]/g, "")
 			.toLowerCase();
 
-		if (NEGATED_SCHEDULING_INTENT_PATTERN.test(normalizedMessage)) {
+		if (
+			NEGATED_SCHEDULING_INTENT_PATTERN.test(normalizedMessage) ||
+			NON_SCHEDULING_HORARIO_PATTERN.test(normalizedMessage)
+		) {
 			return false;
 		}
 
