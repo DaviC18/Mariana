@@ -22,6 +22,7 @@ import {
 	conversations,
 	leads,
 	messages,
+	outboundMessages,
 	schedulingSessions,
 	schedulingSlots,
 	whatsappWebhookEvents,
@@ -322,6 +323,10 @@ test("POST /webhooks/whatsapp - fluxo completo: lead, conversation, inbound, deb
 	assert.equal(outboundMessage.conversationId, createdConversation.id);
 
 	assert.equal(outboundMessage.role, "assistant");
+	const outboundBeforeDuplicate = await db
+		.select({ id: outboundMessages.id })
+		.from(outboundMessages)
+		.where(eq(outboundMessages.conversationId, createdConversation.id));
 
 	const responseDuplicate = await app.inject({
 		headers: {
@@ -341,6 +346,12 @@ test("POST /webhooks/whatsapp - fluxo completo: lead, conversation, inbound, deb
 		.where(eq(messages.externalId, inboundWamid));
 
 	assert.equal(duplicateMessages.length, 1);
+
+	const outboundAfterDuplicate = await db
+		.select({ id: outboundMessages.id })
+		.from(outboundMessages)
+		.where(eq(outboundMessages.conversationId, createdConversation.id));
+	assert.deepEqual(outboundAfterDuplicate, outboundBeforeDuplicate);
 
 	const secondInboundWamid = `wamid.inbound2_${Date.now()}`;
 

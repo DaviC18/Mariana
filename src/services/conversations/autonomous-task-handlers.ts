@@ -2,10 +2,11 @@
 /** biome-ignore-all lint/complexity/noExcessiveCognitiveComplexity: <> */
 /** biome-ignore-all lint/style/useFilenamingConvention: <> */
 
-import { and, asc, eq, gt, inArray, isNull } from "drizzle-orm";
+import { and, asc, eq, gt, gte, inArray, isNull, lte, or } from "drizzle-orm";
 
 import { db } from "../../db/connections";
 import {
+	autonomousTasks,
 	consultants,
 	conversations,
 	leads,
@@ -31,6 +32,11 @@ import {
 	PermanentAutonomousTaskError,
 } from "./autonomous-task-executor";
 import { generateMarianaResponse } from "./generateMarianaResponse";
+import {
+	buildInboundReplyIdempotencyKey,
+	getInboundBatchCutoffAt,
+	selectInboundMessageBatch,
+} from "./inbound-message-batch";
 
 const schedulingChoiceService = new SchedulingChoiceService();
 const schedulingConfirmationService = new SchedulingConfirmationService();
@@ -91,14 +97,16 @@ function buttonPayload(payload: {
 }
 
 /**
- * Handler de mensagem de texto de entrada. Processa todas as mensagens ainda
- * não processadas da conversa como um lote (debounce durável), gera a resposta
- * da Mariana e a enfileira no outbox. É idempotente: a chave do outbox é
- * derivada da última mensagem do lote.
+ * A task anchor owns a persisted debounce cohort. Only unprocessed user
+ * messages referenced by inbound tasks in that cohort are included; stale
+ * history without a matching task is never folded into the current reply.
  */
 const handleProcessInboundMessage: AutonomousTaskHandler = async ({ task }) => {
-	const { conversationId, payload: taskPayload } = task;
+	const { conversationId, payload: taskPayload, triggerMessageId } = task;
 	const eventId = taskPayload?.eventId as string | undefined;
+	if (!triggerMessageId) {
+		throw new PermanentAutonomousTaskError("Inbound trigger message missing");
+	}
 
 	const [conversation] = await db
 		.select({ id: conversations.id, leadId: conversations.leadId })
@@ -110,21 +118,39 @@ const handleProcessInboundMessage: AutonomousTaskHandler = async ({ task }) => {
 		throw new PermanentAutonomousTaskError("Conversation not found");
 	}
 
-	const unprocessed = await db
+	const batchCandidates = await db
 		.select({
 			content: messages.content,
 			createdAt: messages.createdAt,
 			id: messages.id,
+			taskCreatedAt: autonomousTasks.createdAt,
+			taskId: autonomousTasks.id,
+			taskPayload: autonomousTasks.payload,
 		})
-		.from(messages)
+		.from(autonomousTasks)
+		.innerJoin(messages, eq(messages.id, autonomousTasks.triggerMessageId))
 		.where(
 			and(
+				eq(autonomousTasks.conversationId, conversationId),
+				eq(autonomousTasks.taskType, PROCESS_INBOUND_MESSAGE_TASK),
+				inArray(autonomousTasks.status, ["pending", "processing"]),
+				or(
+					eq(autonomousTasks.id, task.id),
+					and(
+						gte(autonomousTasks.createdAt, task.createdAt),
+						lte(autonomousTasks.createdAt, getInboundBatchCutoffAt(task))
+					)
+				),
 				eq(messages.conversationId, conversationId),
 				eq(messages.role, "user"),
 				isNull(messages.processedAt)
 			)
 		)
-		.orderBy(asc(messages.createdAt));
+		.orderBy(asc(autonomousTasks.createdAt), asc(autonomousTasks.id));
+	const unprocessed = selectInboundMessageBatch({
+		anchorTask: task,
+		candidates: batchCandidates,
+	});
 
 	if (unprocessed.length === 0) {
 		await markEventProcessed(eventId);
@@ -138,7 +164,10 @@ const handleProcessInboundMessage: AutonomousTaskHandler = async ({ task }) => {
 	}
 
 	const messageIds = unprocessed.map((message) => message.id);
-	const runKey = `mariana-reply:${conversationId}:${lastMessage.id}`;
+	const runKey = buildInboundReplyIdempotencyKey(
+		conversationId,
+		triggerMessageId
+	);
 
 	const [existingOutbound] = await db
 		.select({ id: outboundMessages.id })

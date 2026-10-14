@@ -10,6 +10,7 @@ import { autonomousTasks } from "../../db/schema/autonomous-tasks";
 import { conversations } from "../../db/schema/conversations";
 import { leads } from "../../db/schema/leads";
 import {
+	type AutonomousTask,
 	executeNextAutonomousTask,
 	PermanentAutonomousTaskError,
 	recoverStaleAutonomousTasks,
@@ -316,6 +317,96 @@ test("runAutonomousTasksUntilIdle processa tarefas da conversa em ordem", async 
 		});
 
 		assert.equal(processed, 2);
+		assert.deepEqual(order, ["primeira", "segunda"]);
+	} finally {
+		await cleanup(leadId, conversationId);
+	}
+});
+
+test("tarefa mais nova não ultrapassa tarefa antiga em backoff", async () => {
+	const { conversationId, leadId } = await createConversationFixture();
+
+	try {
+		const now = Date.now();
+		const [olderTask] = await insertTask(conversationId, {
+			availableAt: new Date(now + 60_000),
+			createdAt: new Date(now - 2000),
+			payload: { label: "older" },
+		});
+		await insertTask(conversationId, {
+			availableAt: new Date(now - 1000),
+			createdAt: new Date(now - 1000),
+			payload: { label: "newer" },
+		});
+		assert.ok(olderTask);
+
+		const handlers = {
+			test_task: async () => ({}),
+		};
+		const result = await executeNextAutonomousTask({
+			conversationId,
+			handlers,
+		});
+		assert.deepEqual(result, { status: "idle" });
+
+		await db
+			.update(autonomousTasks)
+			.set({ availableAt: new Date(now - 1000) })
+			.where(eq(autonomousTasks.id, olderTask.id));
+
+		const order: string[] = [];
+		await runAutonomousTasksUntilIdle({
+			conversationId,
+			handlers: {
+				test_task: async ({ task }) => {
+					order.push(String(task.payload.label));
+					return {};
+				},
+			},
+		});
+		assert.deepEqual(order, ["older", "newer"]);
+	} finally {
+		await cleanup(leadId, conversationId);
+	}
+});
+
+test("workers concorrentes não executam duas tarefas da mesma conversa em paralelo", async () => {
+	const { conversationId, leadId } = await createConversationFixture();
+
+	try {
+		const base = Date.now() - 5000;
+		await insertTask(conversationId, {
+			availableAt: new Date(base),
+			createdAt: new Date(base),
+			payload: { label: "primeira" },
+		});
+		await insertTask(conversationId, {
+			availableAt: new Date(base + 1000),
+			createdAt: new Date(base + 1000),
+			payload: { label: "segunda" },
+		});
+
+		let activeHandlers = 0;
+		let maximumActiveHandlers = 0;
+		const order: string[] = [];
+		const handlers = {
+			test_task: async ({ task }: { task: AutonomousTask }) => {
+				activeHandlers += 1;
+				maximumActiveHandlers = Math.max(maximumActiveHandlers, activeHandlers);
+				await new Promise((resolve) => setTimeout(resolve, 20));
+				order.push(String(task.payload.label));
+				activeHandlers -= 1;
+				return {};
+			},
+		};
+
+		await Promise.all([
+			executeNextAutonomousTask({ conversationId, handlers }),
+			executeNextAutonomousTask({ conversationId, handlers }),
+		]);
+		await runAutonomousTasksUntilIdle({ conversationId, handlers });
+
+		assert.equal(maximumActiveHandlers, 1);
 		assert.deepEqual(order, ["primeira", "segunda"]);
 	} finally {
 		await cleanup(leadId, conversationId);

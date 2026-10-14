@@ -1,12 +1,18 @@
 /** biome-ignore-all lint/style/useFilenamingConvention: <> */
 /** biome-ignore-all lint/performance/noAwaitInLoops: <> */
 
+import { and, eq, gt, isNull } from "drizzle-orm";
+import { db } from "../../db/connections";
+import { autonomousTasks } from "../../db/schema";
 import { env } from "../../env";
 import {
 	executeNextAutonomousTask,
 	recoverStaleAutonomousTasks,
 } from "../conversations/autonomous-task-executor";
-import { createAutonomousTaskHandlers } from "../conversations/autonomous-task-handlers";
+import {
+	createAutonomousTaskHandlers,
+	PROCESS_INBOUND_MESSAGE_TASK,
+} from "../conversations/autonomous-task-handlers";
 import {
 	executeNextOutboundMessage,
 	type OutboundSender,
@@ -102,6 +108,20 @@ export async function drainConversationWork(
 	conversationId: string,
 	{ sender }: { sender?: OutboundSender } = {}
 ): Promise<{ outbound: number; tasks: number }> {
+	const now = new Date();
+	await db
+		.update(autonomousTasks)
+		.set({ availableAt: now })
+		.where(
+			and(
+				eq(autonomousTasks.conversationId, conversationId),
+				eq(autonomousTasks.taskType, PROCESS_INBOUND_MESSAGE_TASK),
+				eq(autonomousTasks.status, "pending"),
+				isNull(autonomousTasks.startedAt),
+				gt(autonomousTasks.availableAt, now)
+			)
+		);
+
 	const handlers = createAutonomousTaskHandlers();
 
 	let tasks = 0;

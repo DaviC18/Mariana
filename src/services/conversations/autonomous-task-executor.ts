@@ -82,7 +82,21 @@ async function claimNextTask({
           WHERE other."conversationId" = task."conversationId"
             AND other."status" = 'processing'
         )
-      ORDER BY task."availableAt", task."createdAt"
+				AND NOT EXISTS (
+					SELECT 1
+					FROM "autonomous_tasks" AS older
+					WHERE older."conversationId" = task."conversationId"
+						AND older."status" = 'pending'
+						AND older."attempts" < older."maxAttempts"
+						AND (
+							older."createdAt" < task."createdAt"
+							OR (
+								older."createdAt" = task."createdAt"
+								AND older."id" < task."id"
+							)
+						)
+				)
+			ORDER BY task."createdAt", task."id"
       FOR UPDATE SKIP LOCKED
       LIMIT 1
     )

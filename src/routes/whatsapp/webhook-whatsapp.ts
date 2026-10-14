@@ -4,7 +4,7 @@
 /** biome-ignore-all lint/suspicious/useAwait: <> */
 /** biome-ignore-all assist/source/useSortedKeys: <> */
 
-import { and, eq, ne, sql } from "drizzle-orm";
+import { and, eq, gt, isNull, ne, sql } from "drizzle-orm";
 import type { FastifyPluginCallbackZod } from "fastify-type-provider-zod";
 
 import { db } from "../../db/connections";
@@ -127,41 +127,97 @@ async function claimWhatsAppWebhookEvent({
 }
 
 export async function enqueueTask({
+	availableAt,
 	conversationId,
 	idempotencyKey,
 	payload,
+	preserveExisting = false,
 	taskType,
 	triggerMessageId,
 }: {
+	availableAt?: Date;
 	conversationId: string;
 	idempotencyKey: string;
 	payload: Record<string, unknown>;
+	preserveExisting?: boolean;
 	taskType: string;
 	triggerMessageId?: string;
-}) {
-	await db
-		.insert(autonomousTasks)
-		.values({
-			conversationId,
-			idempotencyKey,
+}): Promise<boolean> {
+	const taskInsert = db.insert(autonomousTasks).values({
+		availableAt: availableAt ?? new Date(),
+		conversationId,
+		idempotencyKey,
+		payload,
+		taskType,
+		triggerMessageId: triggerMessageId ?? null,
+	});
+
+	if (preserveExisting) {
+		const [insertedTask] = await taskInsert
+			.onConflictDoNothing({ target: autonomousTasks.idempotencyKey })
+			.returning({ id: autonomousTasks.id });
+		return Boolean(insertedTask);
+	}
+
+	await taskInsert.onConflictDoUpdate({
+		set: {
+			availableAt: availableAt ?? new Date(),
+			attempts: 0,
+			lastError: null,
+			leaseExpiresAt: null,
+			leaseToken: null,
 			payload,
-			taskType,
-			triggerMessageId: triggerMessageId ?? null,
-		})
-		.onConflictDoUpdate({
-			set: {
-				availableAt: new Date(),
-				attempts: 0,
-				lastError: null,
-				leaseExpiresAt: null,
-				leaseToken: null,
-				payload,
-				status: "pending",
-				updatedAt: new Date(),
-			},
-			setWhere: ne(autonomousTasks.status, "processing"),
-			target: autonomousTasks.idempotencyKey,
-		});
+			status: "pending",
+			updatedAt: new Date(),
+		},
+		setWhere: ne(autonomousTasks.status, "processing"),
+		target: autonomousTasks.idempotencyKey,
+	});
+	return true;
+}
+
+async function extendOpenInboundBatch({
+	batchCutoffAt,
+	conversationId,
+	now,
+}: {
+	batchCutoffAt: Date;
+	conversationId: string;
+	now: Date;
+}) {
+	const pendingTasks = await db
+		.select({ id: autonomousTasks.id, payload: autonomousTasks.payload })
+		.from(autonomousTasks)
+		.where(
+			and(
+				eq(autonomousTasks.conversationId, conversationId),
+				eq(autonomousTasks.taskType, PROCESS_INBOUND_MESSAGE_TASK),
+				eq(autonomousTasks.status, "pending"),
+				isNull(autonomousTasks.startedAt),
+				gt(autonomousTasks.availableAt, now)
+			)
+		);
+
+	for (const pendingTask of pendingTasks) {
+		await db
+			.update(autonomousTasks)
+			.set({
+				availableAt: batchCutoffAt,
+				payload: {
+					...pendingTask.payload,
+					batchCutoffAt: batchCutoffAt.toISOString(),
+				},
+				updatedAt: now,
+			})
+			.where(
+				and(
+					eq(autonomousTasks.id, pendingTask.id),
+					eq(autonomousTasks.status, "pending"),
+					isNull(autonomousTasks.startedAt),
+					gt(autonomousTasks.availableAt, now)
+				)
+			);
+	}
 }
 
 export const webhookWhatsApp: FastifyPluginCallbackZod = (app, _opts, done) => {
@@ -385,17 +441,36 @@ export const webhookWhatsApp: FastifyPluginCallbackZod = (app, _opts, done) => {
 								})
 								.where(eq(conversations.id, conversation.id));
 
-							await enqueueTask({
+							if (!inboundMessage) {
+								throw new Error("Inbound message not found");
+							}
+
+							const now = new Date();
+							const batchCutoffAt = new Date(
+								now.getTime() + env.MESSAGE_DEBOUNCE_MS
+							);
+							const insertedTask = await enqueueTask({
+								availableAt: batchCutoffAt,
 								conversationId: conversation.id,
 								idempotencyKey: `inbound:${externalId}`,
 								payload: {
+									batchCutoffAt: batchCutoffAt.toISOString(),
 									eventExternalId: externalId,
 									eventId: event.id,
 									kind: "text",
 								},
+								preserveExisting: true,
 								taskType: PROCESS_INBOUND_MESSAGE_TASK,
-								triggerMessageId: inboundMessage?.id,
+								triggerMessageId: inboundMessage.id,
 							});
+
+							if (insertedTask) {
+								await extendOpenInboundBatch({
+									batchCutoffAt,
+									conversationId: conversation.id,
+									now,
+								});
+							}
 						}
 					} catch (err) {
 						request.log.error(
