@@ -43,7 +43,7 @@ const UUID_PATTERN =
 	/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 async function markEventProcessed(eventId: string | undefined) {
-	if (!eventId || !UUID_PATTERN.test(eventId)) {
+	if (!(eventId && UUID_PATTERN.test(eventId))) {
 		return;
 	}
 
@@ -445,7 +445,7 @@ const handleSendConsultantPreferenceQuestion: AutonomousTaskHandler = async ({
 
 	await enqueueOutboundMessage({
 		conversationId,
-		eventId: null,
+		eventId: undefined,
 		idempotencyKey: runKey,
 		leadId: lead.id,
 		payload: buttonPayload({
@@ -583,7 +583,7 @@ const handleProcessConsultantPreferenceReply: AutonomousTaskHandler = async ({
 			// Nenhum consultor ativo com disponibilidade
 			await enqueueOutboundMessage({
 				conversationId,
-				eventId: null,
+				eventId: undefined,
 				idempotencyKey: runKey,
 				leadId: lead.id,
 				payload: {
@@ -607,7 +607,7 @@ const handleProcessConsultantPreferenceReply: AutonomousTaskHandler = async ({
 		// Enviar lista de consultores com botões
 		await enqueueOutboundMessage({
 			conversationId,
-			eventId: null,
+			eventId: undefined,
 			idempotencyKey: runKey,
 			leadId: lead.id,
 			payload: buttonPayload({
@@ -631,7 +631,7 @@ const handleProcessConsultantPreferenceReply: AutonomousTaskHandler = async ({
 		if (slots.length === 0) {
 			await enqueueOutboundMessage({
 				conversationId,
-				eventId: null,
+				eventId: undefined,
 				idempotencyKey: runKey,
 				leadId: lead.id,
 				payload: {
@@ -655,7 +655,7 @@ const handleProcessConsultantPreferenceReply: AutonomousTaskHandler = async ({
 		// Enviar slots como botões
 		await enqueueOutboundMessage({
 			conversationId,
-			eventId: null,
+			eventId: undefined,
 			idempotencyKey: runKey,
 			leadId: lead.id,
 			payload: buttonPayload({
@@ -799,7 +799,7 @@ const handleProcessConsultantSelection: AutonomousTaskHandler = async ({
 	// Enviar slots do consultor selecionado
 	await enqueueOutboundMessage({
 		conversationId,
-		eventId: null,
+		eventId: undefined,
 		idempotencyKey: runKey,
 		leadId: lead.id,
 		payload: buttonPayload({
@@ -930,7 +930,7 @@ const handleSendConfirmationRequest: AutonomousTaskHandler = async ({
 
 	await enqueueOutboundMessage({
 		conversationId,
-		eventId: null,
+		eventId: undefined,
 		idempotencyKey: runKey,
 		leadId: lead.id,
 		payload: buttonPayload(confirmation),

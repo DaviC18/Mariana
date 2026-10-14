@@ -222,7 +222,6 @@ test("TEST 5: Qualificação e nextAction preservados com BusinessProfile", asyn
 				usage: null,
 			},
 			result: {
-				businessAction: null,
 				evidenceUsed: [],
 				leadUpdate: {
 					consortiumType: "imóvel",

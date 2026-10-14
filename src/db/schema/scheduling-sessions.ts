@@ -12,7 +12,6 @@ import {
 import { consultants } from "./consultants";
 import { conversations } from "./conversations";
 import { leads } from "./leads";
-import { schedulingSlots } from "./scheduling-slots";
 
 export const schedulingSessionStatus = pgEnum("scheduling_session_status", [
 	"active",
@@ -47,9 +46,7 @@ export const schedulingSessions = pgTable(
 			.references(() => conversations.id, {
 				onDelete: "cascade",
 			}),
-		selectedSlotId: uuid().references(() => schedulingSlots.id, {
-			onDelete: "set null",
-		}),
+		selectedSlotId: uuid(),
 		preferredConsultantId: uuid().references(() => consultants.id, {
 			onDelete: "set null",
 		}),

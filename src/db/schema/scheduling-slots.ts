@@ -20,7 +20,9 @@ export const schedulingSlots = pgTable(
 		id: uuid().primaryKey().defaultRandom(),
 		schedulingSessionId: uuid()
 			.notNull()
-			.references(() => schedulingSessions.id, { onDelete: "cascade" }),
+			.references(() => schedulingSessions.id as typeof schedulingSessions.id, {
+				onDelete: "cascade",
+			}),
 		position: integer().notNull(),
 		consultantId: uuid()
 			.notNull()
