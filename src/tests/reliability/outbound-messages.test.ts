@@ -11,6 +11,7 @@ import { messages } from "../../db/schema/messages";
 import { outboundMessages } from "../../db/schema/outbound-messages";
 import { WhatsAppSendError } from "../../integrations/whatsapp/whatsapp-errors";
 import {
+	claimNextOutboundMessage,
 	enqueueOutboundMessage,
 	executeNextOutboundMessage,
 	type OutboundSender,
@@ -322,6 +323,33 @@ test("recupera mensagens presas em sending como unknown", async () => {
 
 		const saved = await getOutbound(message.id);
 		assert.equal(saved.status, "unknown");
+	} finally {
+		await cleanup(leadId, conversationId);
+	}
+});
+
+test("claim do outbox devolve timestamps como Date e payload como objeto", async () => {
+	const { conversationId, leadId } = await createFixture();
+	try {
+		await enqueueOutboundMessage({
+			conversationId,
+			idempotencyKey: `claim-types:${conversationId}`,
+			leadId,
+			payload: { kind: "text", text: "Olá" },
+		});
+
+		const claimed = await claimNextOutboundMessage({
+			conversationId,
+			leaseMs: 60_000,
+		});
+
+		assert.ok(claimed);
+		assert.ok(claimed.createdAt instanceof Date, "createdAt");
+		assert.ok(claimed.availableAt instanceof Date, "availableAt");
+		assert.ok(claimed.updatedAt instanceof Date, "updatedAt");
+		assert.ok(claimed.leaseExpiresAt instanceof Date, "leaseExpiresAt");
+		assert.equal(claimed.sentAt, null);
+		assert.deepEqual(claimed.payload, { kind: "text", text: "Olá" });
 	} finally {
 		await cleanup(leadId, conversationId);
 	}

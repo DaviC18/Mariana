@@ -1,4 +1,4 @@
-import { toDate } from "./autonomous-task-row";
+import { toDate } from "../../db/raw-row";
 
 export interface InboundBatchTask {
 	createdAt: Date;

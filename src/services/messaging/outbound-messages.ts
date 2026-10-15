@@ -7,6 +7,7 @@ import type { InferSelectModel } from "drizzle-orm";
 import { and, eq, sql } from "drizzle-orm";
 
 import { db } from "../../db/connections";
+import { mapRawRow } from "../../db/raw-row";
 import { leads, messages, outboundMessages } from "../../db/schema";
 import { WhatsAppSendError } from "../../integrations/whatsapp/whatsapp-errors";
 import { whatsAppService } from "../../integrations/whatsapp/whatsapp-service";
@@ -95,7 +96,7 @@ export async function enqueueOutboundMessage({
 	return existing;
 }
 
-async function claimNextOutboundMessage({
+export async function claimNextOutboundMessage({
 	conversationId,
 	leaseMs,
 }: {
@@ -133,9 +134,9 @@ async function claimNextOutboundMessage({
     WHERE msg."id" = candidate."id"
     RETURNING msg.*
   `
-	)) as OutboundMessage[];
+	)) as Record<string, unknown>[];
 
-	return rows[0] as OutboundMessage | undefined;
+	return rows[0] ? mapRawRow(outboundMessages, rows[0]) : undefined;
 }
 
 export async function renewOutboundLease({
