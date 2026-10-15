@@ -45,13 +45,17 @@ export function resolveTestDatabaseEnv(source: NodeJS.ProcessEnv): {
 	const testUrl = source.TEST_DATABASE_URL;
 	if (!testUrl) {
 		throw new UnsafeTestDatabaseError(
-			"TEST_DATABASE_URL is required for DB tests. Point it at a disposable database (Neon branch or local Postgres)."
+			"TEST_DATABASE_URL is required for DB tests. Point it at a disposable local Postgres database."
 		);
 	}
 
-	const testIdentity = databaseIdentity(
-		parsePostgresUrl("TEST_DATABASE_URL", testUrl)
-	);
+	const parsedTestUrl = parsePostgresUrl("TEST_DATABASE_URL", testUrl);
+	if (parsedTestUrl.hostname.toLowerCase().includes("neon.tech")) {
+		throw new UnsafeTestDatabaseError(
+			"TEST_DATABASE_URL points at neon.tech. DB tests reset the database, so they only run against a local disposable Postgres."
+		);
+	}
+	const testIdentity = databaseIdentity(parsedTestUrl);
 
 	const devUrl = source.DATABASE_URL;
 	if (devUrl) {

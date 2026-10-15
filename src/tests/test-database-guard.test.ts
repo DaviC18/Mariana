@@ -7,6 +7,8 @@ import {
 	UnsafeTestDatabaseError,
 } from "./support/test-database-guard";
 
+const NEON_HOST_ERROR = /neon\.tech/;
+
 const devUrl =
 	"postgresql://user:secret@ep-dev-123.sa-east-1.aws.neon.tech/neondb";
 
@@ -53,12 +55,35 @@ test("recusa workers de confiabilidade habilitados", () => {
 	);
 });
 
+test("recusa TEST_DATABASE_URL hospedado no Neon", () => {
+	assert.throws(
+		() =>
+			resolveTestDatabaseEnv({
+				DATABASE_URL: devUrl,
+				TEST_DATABASE_URL:
+					"postgresql://user:secret@ep-other-456.sa-east-1.aws.neon.tech/mariana_test",
+			}),
+		NEON_HOST_ERROR
+	);
+});
+
+test("recusa Neon mesmo sem DATABASE_URL definido", () => {
+	assert.throws(
+		() =>
+			resolveTestDatabaseEnv({
+				TEST_DATABASE_URL:
+					"postgresql://user:secret@EP-OTHER-456.NEON.TECH/mariana_test",
+			}),
+		UnsafeTestDatabaseError
+	);
+});
+
 test("aceita outro banco no mesmo host e desliga os workers", () => {
-	const testUrl =
-		"postgresql://user:secret@ep-dev-123.sa-east-1.aws.neon.tech/mariana_test";
+	const localDevUrl = "postgresql://mariana:pw@localhost:5432/mariana";
+	const testUrl = "postgresql://mariana:pw@localhost:5432/mariana_test";
 	assert.deepEqual(
 		resolveTestDatabaseEnv({
-			DATABASE_URL: devUrl,
+			DATABASE_URL: localDevUrl,
 			TEST_DATABASE_URL: testUrl,
 		}),
 		{
