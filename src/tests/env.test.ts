@@ -8,6 +8,7 @@ const MISSING_GEMINI_ERROR =
 const NON_POSTGRES_DATABASE_URL_ERROR =
 	/DATABASE_URL should start with postgresql:\/\//;
 const SCHEDULE_CONFIRMATION_ERROR = /SCHEDULE_CONFIRMATION_MINUTES/;
+const WHATSAPP_SEND_TIMEOUT_ERROR = /WHATSAPP_SEND_TIMEOUT_MS/;
 
 const VALID_SOURCE = {
 	DATABASE_URL: "postgresql://user:password@localhost:5432/mariana",
@@ -35,6 +36,7 @@ test("parseEnv aceita uma configuração válida e aplica os defaults", () => {
 	assert.equal(parsed.PORT, 3252);
 	assert.equal(parsed.MESSAGE_DEBOUNCE_MS, 15_000);
 	assert.equal(parsed.SCHEDULE_CONFIRMATION_MINUTES, 60);
+	assert.equal(parsed.WHATSAPP_SEND_TIMEOUT_MS, 15_000);
 	assert.equal(
 		parsed.DATABASE_URL,
 		"postgresql://user:password@localhost:5432/mariana"
@@ -72,4 +74,23 @@ test("parseEnv rejeita SCHEDULE_CONFIRMATION_MINUTES fora do intervalo permitido
 
 test("envSchema não marca META_ADS_ACCESS_TOKEN como obrigatório", () => {
 	assert.equal(Object.hasOwn(envSchema.shape, "META_ADS_ACCESS_TOKEN"), false);
+});
+
+test("parseEnv aceita WHATSAPP_SEND_TIMEOUT_MS configurado", () => {
+	assert.equal(
+		parseEnv({ ...VALID_SOURCE, WHATSAPP_SEND_TIMEOUT_MS: "20000" })
+			.WHATSAPP_SEND_TIMEOUT_MS,
+		20_000
+	);
+});
+
+test("parseEnv rejeita WHATSAPP_SEND_TIMEOUT_MS fora do intervalo seguro", () => {
+	// Precisa ficar bem abaixo do lease de 60s do outbox.
+	for (const value of ["0", "500", "45001", "60000"]) {
+		assert.throws(
+			() => parseEnv({ ...VALID_SOURCE, WHATSAPP_SEND_TIMEOUT_MS: value }),
+			WHATSAPP_SEND_TIMEOUT_ERROR,
+			value
+		);
+	}
 });

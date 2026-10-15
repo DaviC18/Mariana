@@ -227,3 +227,82 @@ test("WhatsAppService valida assinaturas HMAC-SHA256 corretamente", () => {
 	assert.equal(service.verifySignature(rawBody, invalidHeader), false);
 	assert.equal(service.verifySignature(rawBody, undefined), false);
 });
+
+// fetch que nunca resolve e ignora o AbortSignal: o pior caso de um socket
+// pendurado. O cliente ainda precisa liberar o worker no timeout.
+function installHangingFetch(t: { after: (fn: () => void) => void }) {
+	const originalFetch = globalThis.fetch;
+	let calls = 0;
+	globalThis.fetch = (() => {
+		calls += 1;
+		return new Promise<Response>(() => undefined);
+	}) as typeof fetch;
+	t.after(() => {
+		globalThis.fetch = originalFetch;
+	});
+	return () => calls;
+}
+
+function failAfter(ms: number): Promise<never> {
+	return new Promise((_, reject) => {
+		setTimeout(
+			() => reject(new Error(`still pending after ${ms}ms`)),
+			ms
+		).unref();
+	});
+}
+
+test("WhatsAppClient aborta envio pendurado no timeout como incerto", async (t) => {
+	const fetchCalls = installHangingFetch(t);
+	const client = new WhatsAppClient({ sendTimeoutMs: 50 });
+
+	await assert.rejects(
+		Promise.race([
+			client.sendTextMessage("5511999999999", "Olá"),
+			failAfter(2000),
+		]),
+		(error: unknown) => {
+			assert.ok(error instanceof WhatsAppSendError, String(error));
+			assert.equal(error.kind, "uncertain");
+			assert.equal(error.retryable, false);
+			return true;
+		}
+	);
+	assert.equal(fetchCalls(), 1);
+});
+
+test("WhatsAppClient aborta Reply Buttons pendurado no timeout como incerto", async (t) => {
+	installHangingFetch(t);
+	const client = new WhatsAppClient({ sendTimeoutMs: 50 });
+
+	await assert.rejects(
+		Promise.race([
+			client.sendReplyButtonsMessage("5511999999999", "Escolha", [
+				{ id: "schedule:slot:1", title: "25/09 às 14:00" },
+			]),
+			failAfter(2000),
+		]),
+		(error: unknown) =>
+			error instanceof WhatsAppSendError && error.kind === "uncertain"
+	);
+});
+
+test("WhatsAppClient passa um AbortSignal para o fetch", async (t) => {
+	const originalFetch = globalThis.fetch;
+	let signal: AbortSignal | null | undefined;
+	globalThis.fetch = (async (_url: string | URL, options?: RequestInit) => {
+		signal = options?.signal;
+		return new Response(JSON.stringify({ messages: [{ id: "wamid.ok" }] }), {
+			status: 200,
+		});
+	}) as typeof fetch;
+	t.after(() => {
+		globalThis.fetch = originalFetch;
+	});
+
+	await new WhatsAppClient({ sendTimeoutMs: 1000 }).sendTextMessage(
+		"5511999999999",
+		"Olá"
+	);
+	assert.ok(signal instanceof AbortSignal);
+});

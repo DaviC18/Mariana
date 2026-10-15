@@ -9,7 +9,9 @@ import { conversations } from "../../db/schema/conversations";
 import { leads } from "../../db/schema/leads";
 import { messages } from "../../db/schema/messages";
 import { outboundMessages } from "../../db/schema/outbound-messages";
+import { WhatsAppClient } from "../../integrations/whatsapp/whatsapp-client";
 import { WhatsAppSendError } from "../../integrations/whatsapp/whatsapp-errors";
+import { WhatsAppService } from "../../integrations/whatsapp/whatsapp-service";
 import {
 	claimNextOutboundMessage,
 	enqueueOutboundMessage,
@@ -353,4 +355,60 @@ test("claim do outbox devolve timestamps como Date e payload como objeto", async
 	} finally {
 		await cleanup(leadId, conversationId);
 	}
+});
+
+test("envio pendurado na Graph API termina em unknown antes do lease e não é reenviado", async (t) => {
+	const { conversationId, leadId } = await createFixture();
+	t.after(() => cleanup(leadId, conversationId));
+
+	const originalFetch = globalThis.fetch;
+	let fetchCalls = 0;
+	// Nunca resolve e ignora o AbortSignal.
+	globalThis.fetch = (() => {
+		fetchCalls += 1;
+		return new Promise<Response>(() => undefined);
+	}) as typeof fetch;
+	t.after(() => {
+		globalThis.fetch = originalFetch;
+	});
+
+	const queued = await enqueueOutboundMessage({
+		conversationId,
+		idempotencyKey: `hang:${conversationId}`,
+		leadId,
+		payload: { kind: "text", text: "Olá" },
+	});
+	assert.ok(queued);
+
+	const leaseMs = 2000;
+	const sender = new WhatsAppService(
+		new WhatsAppClient({ sendTimeoutMs: 100 })
+	);
+	const startedAt = Date.now();
+	const result = await Promise.race([
+		executeNextOutboundMessage({ conversationId, leaseMs, sender }),
+		new Promise<never>((_, reject) => {
+			setTimeout(
+				() => reject(new Error("worker still blocked after the lease")),
+				leaseMs
+			).unref();
+		}),
+	]);
+
+	assert.ok(Date.now() - startedAt < leaseMs, "worker released before lease");
+	assert.equal(result.status, "unknown");
+
+	const row = await getOutbound(queued.id);
+	assert.equal(row.status, "unknown");
+	assert.equal(row.attempts, 1);
+	assert.equal(row.leaseToken, null);
+
+	const next = await executeNextOutboundMessage({
+		conversationId,
+		leaseMs,
+		sender,
+	});
+	assert.equal(next.status, "idle");
+	assert.equal(fetchCalls, 1);
+	assert.equal((await getOutbound(queued.id)).status, "unknown");
 });

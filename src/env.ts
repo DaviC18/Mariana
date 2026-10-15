@@ -51,6 +51,14 @@ export const envSchema = z.object({
 	WHATSAPP_APP_SECRET: z.string().min(1),
 	WHATSAPP_GRAPH_API_VERSION: z.string().min(1),
 	WHATSAPP_PHONE_NUMBER_ID: z.string().min(1),
+	// Bem abaixo do lease de 60s do outbox: o worker precisa ser liberado e
+	// marcar o envio como incerto antes que o lease expire.
+	WHATSAPP_SEND_TIMEOUT_MS: z.coerce
+		.number()
+		.int()
+		.min(1000)
+		.max(45_000)
+		.default(15_000),
 	WHATSAPP_VERIFY_TOKEN: z.string().min(1),
 	WHATSAPP_WABA_ID: z.string().min(1),
 });
@@ -89,6 +97,10 @@ export function buildEnvInput(source: NodeJS.ProcessEnv) {
 		WHATSAPP_APP_SECRET: source.WHATSAPP_APP_SECRET,
 		WHATSAPP_GRAPH_API_VERSION: source.WHATSAPP_GRAPH_API_VERSION,
 		WHATSAPP_PHONE_NUMBER_ID: source.WHATSAPP_PHONE_NUMBER_ID,
+		WHATSAPP_SEND_TIMEOUT_MS: parseIntegerEnv(
+			source.WHATSAPP_SEND_TIMEOUT_MS,
+			15_000
+		),
 		WHATSAPP_VERIFY_TOKEN: source.WHATSAPP_VERIFY_TOKEN,
 		WHATSAPP_WABA_ID: source.WHATSAPP_WABA_ID,
 	};
