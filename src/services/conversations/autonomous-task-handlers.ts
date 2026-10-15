@@ -449,15 +449,6 @@ const handleSendConsultantPreferenceQuestion: AutonomousTaskHandler = async ({
 		throw new PermanentAutonomousTaskError("Lead not found");
 	}
 
-	// Atualizar workflow stage para awaiting_consultant_preference
-	await db
-		.update(schedulingSessions)
-		.set({
-			workflowStage: "awaiting_consultant_preference",
-			updatedAt: new Date(),
-		})
-		.where(eq(schedulingSessions.id, schedulingSessionId));
-
 	// Enviar pergunta de preferência com botões interativos
 	const runKey = `consultant-preference:${conversationId}:${schedulingSessionId}`;
 
@@ -472,24 +463,37 @@ const handleSendConsultantPreferenceQuestion: AutonomousTaskHandler = async ({
 		return { deduplicated: true };
 	}
 
-	await enqueueOutboundMessage({
-		conversationId,
-		eventId: undefined,
-		idempotencyKey: runKey,
-		leadId: lead.id,
-		payload: buttonPayload({
-			body: "Você tem preferência por algum consultor?",
-			buttons: [
-				{
-					id: `pref:${session.id}:has_preference`,
-					title: "Tenho preferência",
-				},
-				{
-					id: `pref:${session.id}:no_preference`,
-					title: "Sem preferência",
-				},
-			],
-		}),
+	// A transição e a mensagem são atômicas: se o outbox falhar, a sessão
+	// continua em awaiting_availability e a nova tentativa reenvia a pergunta.
+	await db.transaction(async (tx) => {
+		await tx
+			.update(schedulingSessions)
+			.set({
+				workflowStage: "awaiting_consultant_preference",
+				updatedAt: new Date(),
+			})
+			.where(eq(schedulingSessions.id, schedulingSessionId));
+
+		await enqueueOutboundMessage({
+			conversationId,
+			eventId: undefined,
+			executor: tx,
+			idempotencyKey: runKey,
+			leadId: lead.id,
+			payload: buttonPayload({
+				body: "Você tem preferência por algum consultor?",
+				buttons: [
+					{
+						id: `pref:${session.id}:has_preference`,
+						title: "Tenho preferência",
+					},
+					{
+						id: `pref:${session.id}:no_preference`,
+						title: "Sem preferência",
+					},
+				],
+			}),
+		});
 	});
 
 	await markEventProcessed(eventId);
@@ -624,28 +628,30 @@ const handleProcessConsultantPreferenceReply: AutonomousTaskHandler = async ({
 			return { noActiveConsultants: true };
 		}
 
-		// Atualizar workflow stage para awaiting_consultant_selection
-		await db
-			.update(schedulingSessions)
-			.set({
-				workflowStage: "awaiting_consultant_selection",
-				updatedAt: new Date(),
-			})
-			.where(eq(schedulingSessions.id, session.id));
+		// Avança o workflow e envia a lista de consultores na mesma transação.
+		await db.transaction(async (tx) => {
+			await tx
+				.update(schedulingSessions)
+				.set({
+					workflowStage: "awaiting_consultant_selection",
+					updatedAt: new Date(),
+				})
+				.where(eq(schedulingSessions.id, session.id));
 
-		// Enviar lista de consultores com botões
-		await enqueueOutboundMessage({
-			conversationId,
-			eventId: undefined,
-			idempotencyKey: runKey,
-			leadId: lead.id,
-			payload: buttonPayload({
-				body: "Escolha um consultor:",
-				buttons: activeConsultants.map((c) => ({
-					id: `consultant:${session.id}:${c.id}`,
-					title: c.name,
-				})),
-			}),
+			await enqueueOutboundMessage({
+				conversationId,
+				eventId: undefined,
+				executor: tx,
+				idempotencyKey: runKey,
+				leadId: lead.id,
+				payload: buttonPayload({
+					body: "Escolha um consultor:",
+					buttons: activeConsultants.map((c) => ({
+						id: `consultant:${session.id}:${c.id}`,
+						title: c.name,
+					})),
+				}),
+			});
 		});
 	} else {
 		// Sem preferência - avançar diretamente para seleção de slot
@@ -672,28 +678,30 @@ const handleProcessConsultantPreferenceReply: AutonomousTaskHandler = async ({
 			return { noSlotsAvailable: true };
 		}
 
-		// Atualizar workflow stage para awaiting_slot_selection
-		await db
-			.update(schedulingSessions)
-			.set({
-				workflowStage: "awaiting_slot_selection",
-				updatedAt: new Date(),
-			})
-			.where(eq(schedulingSessions.id, session.id));
+		// Avança o workflow e envia os slots na mesma transação.
+		await db.transaction(async (tx) => {
+			await tx
+				.update(schedulingSessions)
+				.set({
+					workflowStage: "awaiting_slot_selection",
+					updatedAt: new Date(),
+				})
+				.where(eq(schedulingSessions.id, session.id));
 
-		// Enviar slots como botões
-		await enqueueOutboundMessage({
-			conversationId,
-			eventId: undefined,
-			idempotencyKey: runKey,
-			leadId: lead.id,
-			payload: buttonPayload({
-				body: "Tenho estes horários disponíveis. Escolha uma opção:",
-				buttons: slots.map((slot) => ({
-					id: slot.id,
-					title: formatSlotTitle(slot.startAt),
-				})),
-			}),
+			await enqueueOutboundMessage({
+				conversationId,
+				eventId: undefined,
+				executor: tx,
+				idempotencyKey: runKey,
+				leadId: lead.id,
+				payload: buttonPayload({
+					body: "Tenho estes horários disponíveis. Escolha uma opção:",
+					buttons: slots.map((slot) => ({
+						id: slot.id,
+						title: formatSlotTitle(slot.startAt),
+					})),
+				}),
+			});
 		});
 	}
 
@@ -815,29 +823,31 @@ const handleProcessConsultantSelection: AutonomousTaskHandler = async ({
 		return { deduplicated: true };
 	}
 
-	// Persistir preferência de consultor na sessão
-	await db
-		.update(schedulingSessions)
-		.set({
-			preferredConsultantId: consultantId,
-			workflowStage: "awaiting_slot_selection",
-			updatedAt: new Date(),
-		})
-		.where(eq(schedulingSessions.id, session.id));
+	// Persiste a preferência e envia os slots do consultor na mesma transação.
+	await db.transaction(async (tx) => {
+		await tx
+			.update(schedulingSessions)
+			.set({
+				preferredConsultantId: consultantId,
+				workflowStage: "awaiting_slot_selection",
+				updatedAt: new Date(),
+			})
+			.where(eq(schedulingSessions.id, session.id));
 
-	// Enviar slots do consultor selecionado
-	await enqueueOutboundMessage({
-		conversationId,
-		eventId: undefined,
-		idempotencyKey: runKey,
-		leadId: lead.id,
-		payload: buttonPayload({
-			body: `Horários disponíveis com ${consultantSlots[0].consultantName}:`,
-			buttons: consultantSlots.map((slot) => ({
-				id: slot.id,
-				title: formatSlotTitle(slot.startAt),
-			})),
-		}),
+		await enqueueOutboundMessage({
+			conversationId,
+			eventId: undefined,
+			executor: tx,
+			idempotencyKey: runKey,
+			leadId: lead.id,
+			payload: buttonPayload({
+				body: `Horários disponíveis com ${consultantSlots[0].consultantName}:`,
+				buttons: consultantSlots.map((slot) => ({
+					id: slot.id,
+					title: formatSlotTitle(slot.startAt),
+				})),
+			}),
+		});
 	});
 
 	await markEventProcessed(eventId);
@@ -914,31 +924,6 @@ const handleSendConfirmationRequest: AutonomousTaskHandler = async ({
 		return { skipped: true, reason: choiceResult.reason };
 	}
 
-	// Atualizar workflow stage para awaiting_confirmation
-	const [confirmationSession] = await db
-		.update(schedulingSessions)
-		.set({
-			workflowStage: "awaiting_confirmation",
-			updatedAt: new Date(),
-		})
-		.where(
-			and(
-				eq(schedulingSessions.id, session.id),
-				eq(schedulingSessions.leadId, lead.id),
-				eq(schedulingSessions.conversationId, conversationId),
-				eq(schedulingSessions.status, "active"),
-				eq(schedulingSessions.workflowStage, "awaiting_slot_selection"),
-				eq(schedulingSessions.selectedSlotId, choiceResult.slot.id),
-				gt(schedulingSessions.expiresAt, new Date())
-			)
-		)
-		.returning({ id: schedulingSessions.id });
-
-	if (!confirmationSession) {
-		await markEventProcessed(eventId);
-		return { skipped: true, reason: "session_changed_before_confirmation" };
-	}
-
 	const runKey = `confirmation-request:${conversationId}:${externalId ?? buttonId}`;
 
 	const [existingOutbound] = await db
@@ -957,13 +942,49 @@ const handleSendConfirmationRequest: AutonomousTaskHandler = async ({
 		choiceResult.slot
 	);
 
-	await enqueueOutboundMessage({
-		conversationId,
-		eventId: undefined,
-		idempotencyKey: runKey,
-		leadId: lead.id,
-		payload: buttonPayload(confirmation),
+	// Atualizar workflow stage para awaiting_confirmation e enfileirar o
+	// pedido na mesma transação: se o outbox falhar, a sessão continua em
+	// awaiting_slot_selection e a nova tentativa refaz o pedido.
+	const transitioned = await db.transaction(async (tx) => {
+		const [confirmationSession] = await tx
+			.update(schedulingSessions)
+			.set({
+				workflowStage: "awaiting_confirmation",
+				updatedAt: new Date(),
+			})
+			.where(
+				and(
+					eq(schedulingSessions.id, session.id),
+					eq(schedulingSessions.leadId, lead.id),
+					eq(schedulingSessions.conversationId, conversationId),
+					eq(schedulingSessions.status, "active"),
+					eq(schedulingSessions.workflowStage, "awaiting_slot_selection"),
+					eq(schedulingSessions.selectedSlotId, choiceResult.slot.id),
+					gt(schedulingSessions.expiresAt, new Date())
+				)
+			)
+			.returning({ id: schedulingSessions.id });
+
+		if (!confirmationSession) {
+			return false;
+		}
+
+		await enqueueOutboundMessage({
+			conversationId,
+			eventId: undefined,
+			executor: tx,
+			idempotencyKey: runKey,
+			leadId: lead.id,
+			payload: buttonPayload(confirmation),
+		});
+
+		return true;
 	});
+
+	if (!transitioned) {
+		await markEventProcessed(eventId);
+		return { skipped: true, reason: "session_changed_before_confirmation" };
+	}
 
 	await markEventProcessed(eventId);
 	return { confirmationRequestSent: true };

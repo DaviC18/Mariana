@@ -41,9 +41,17 @@ export type OutboundExecutionResult =
 	| { status: "retry_scheduled"; messageId: string; error: string }
 	| { messageId: string; error: string; status: "failed" | "unknown" };
 
+/**
+ * Conexão ou transação usada para gravar no outbox. Passar a transação do
+ * chamador torna o enfileiramento atômico com a transição de estado que o
+ * originou.
+ */
+export type OutboundExecutor = Pick<typeof db, "insert" | "select">;
+
 export async function enqueueOutboundMessage({
 	conversationId,
 	eventId,
+	executor = db,
 	idempotencyKey,
 	leadId,
 	messageId,
@@ -52,13 +60,14 @@ export async function enqueueOutboundMessage({
 }: {
 	conversationId: string;
 	eventId?: string;
+	executor?: OutboundExecutor;
 	idempotencyKey: string;
 	leadId?: string;
 	messageId?: string;
 	payload: OutboundMessagePayload;
 	maxAttempts?: number;
 }): Promise<OutboundMessage | undefined> {
-	const [inserted] = await db
+	const [inserted] = await executor
 		.insert(outboundMessages)
 		.values({
 			conversationId,
@@ -77,7 +86,7 @@ export async function enqueueOutboundMessage({
 		return inserted;
 	}
 
-	const [existing] = await db
+	const [existing] = await executor
 		.select()
 		.from(outboundMessages)
 		.where(eq(outboundMessages.idempotencyKey, idempotencyKey))
