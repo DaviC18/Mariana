@@ -256,7 +256,8 @@ export const webhookWhatsApp: FastifyPluginCallbackZod = (app, _opts, done) => {
 
 		request.log.warn({
 			event: "whatsapp_webhook_verification_failed",
-			token,
+			mode,
+			tokenMatched: false,
 		});
 
 		return reply.code(403).send({

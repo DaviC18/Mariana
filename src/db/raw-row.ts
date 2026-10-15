@@ -32,8 +32,15 @@ export function mapRawRow<TTable extends PgTable>(
 	const mapped: Record<string, unknown> = {};
 	for (const [key, column] of Object.entries(getTableColumns(table))) {
 		const value = row[column.name];
+		if (value === undefined && column.notNull) {
+			// Coluna obrigatória ausente: schema divergente ou RETURNING
+			// parcial. Falha aqui em vez de propagar `null` tipado como valor.
+			throw new TypeError(
+				`Raw row is missing NOT NULL column "${column.name}"`
+			);
+		}
 		if (value === null || value === undefined) {
-			mapped[key] = value ?? null;
+			mapped[key] = null;
 		} else if (column.dataType === "object date") {
 			mapped[key] = toDate(value);
 		} else if (column.dataType === "object json") {

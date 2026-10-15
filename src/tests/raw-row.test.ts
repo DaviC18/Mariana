@@ -55,3 +55,15 @@ test("mapRawRow rejeita timestamp inválido", () => {
 		TypeError
 	);
 });
+
+test("mapRawRow rejeita coluna NOT NULL ausente da linha", () => {
+	const { createdAt: _createdAt, ...withoutCreatedAt } = rawOutboundRow;
+	assert.throws(() => mapRawRow(outboundMessages, withoutCreatedAt), TypeError);
+	const { payload: _payload, ...withoutPayload } = rawOutboundRow;
+	assert.throws(() => mapRawRow(outboundMessages, withoutPayload), TypeError);
+});
+
+test("mapRawRow mantém null em coluna anulável ausente", () => {
+	const { sentAt: _sentAt, ...withoutSentAt } = rawOutboundRow;
+	assert.equal(mapRawRow(outboundMessages, withoutSentAt).sentAt, null);
+});

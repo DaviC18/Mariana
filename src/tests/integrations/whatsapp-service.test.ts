@@ -306,3 +306,76 @@ test("WhatsAppClient passa um AbortSignal para o fetch", async (t) => {
 	);
 	assert.ok(signal instanceof AbortSignal);
 });
+
+test("WhatsAppClient não loga o telefone do destinatário em erro HTTP", async (t) => {
+	const phone = "5511987654321";
+	const originalFetch = globalThis.fetch;
+	globalThis.fetch = (async () =>
+		new Response(JSON.stringify({ error: { code: 131_026 } }), {
+			status: 400,
+			statusText: "Bad Request",
+		})) as typeof fetch;
+	const logged: string[] = [];
+	t.mock.method(console, "error", (...args: unknown[]) => {
+		logged.push(JSON.stringify(args));
+	});
+	t.after(() => {
+		globalThis.fetch = originalFetch;
+	});
+
+	await assert.rejects(
+		new WhatsAppClient().sendTextMessage(phone, "Olá"),
+		WhatsAppSendError
+	);
+	assert.ok(logged.length > 0, "expected the HTTP error to be logged");
+	assert.ok(!logged.join("").includes(phone), "recipient phone leaked to logs");
+});
+
+// Status de erro chega, mas o corpo nunca termina: a Meta já respondeu, então
+// o envio é classificado pelo status HTTP, não como incerto.
+function installStalledBodyFetch(
+	t: { after: (fn: () => void) => void },
+	status: number
+) {
+	const originalFetch = globalThis.fetch;
+	globalThis.fetch = (async () =>
+		new Response(
+			new ReadableStream({
+				start() {
+					// Nunca enfileira nem fecha: corpo travado.
+				},
+			}),
+			{
+				status,
+			}
+		)) as typeof fetch;
+	t.after(() => {
+		globalThis.fetch = originalFetch;
+	});
+}
+
+for (const { status, kind } of [
+	{ kind: "permanent", status: 400 },
+	{ kind: "retryable", status: 503 },
+]) {
+	test(`WhatsAppClient classifica HTTP ${status} pelo status mesmo com corpo travado`, async (t) => {
+		installStalledBodyFetch(t, status);
+		t.mock.method(console, "error", () => undefined);
+
+		await assert.rejects(
+			Promise.race([
+				new WhatsAppClient({ sendTimeoutMs: 1000 }).sendTextMessage(
+					"5511999999999",
+					"Olá"
+				),
+				failAfter(3000),
+			]),
+			(error: unknown) => {
+				assert.ok(error instanceof WhatsAppSendError, String(error));
+				assert.equal(error.kind, kind);
+				assert.equal(error.httpStatus, status);
+				return true;
+			}
+		);
+	});
+}

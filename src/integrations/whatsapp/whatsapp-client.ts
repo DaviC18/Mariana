@@ -16,15 +16,21 @@ export interface WhatsAppClientOptions {
 }
 
 /**
- * Rejeita quando o sinal aborta. Corre junto com o fetch para liberar o
- * worker mesmo se a requisição ignorar o `AbortSignal`.
+ * Corre a promessa contra o sinal: rejeita no timeout mesmo se a requisição
+ * ignorar o `AbortSignal`.
  */
-function rejectOnAbort(signal: AbortSignal): Promise<never> {
-	return new Promise((_, reject) => {
-		signal.addEventListener("abort", () => reject(signal.reason), {
-			once: true,
-		});
-	});
+function raceAbort<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+	if (signal.aborted) {
+		return Promise.reject(signal.reason);
+	}
+	return Promise.race([
+		promise,
+		new Promise<never>((_, reject) => {
+			signal.addEventListener("abort", () => reject(signal.reason), {
+				once: true,
+			});
+		}),
+	]);
 }
 
 export class WhatsAppClient {
@@ -51,7 +57,7 @@ export class WhatsAppClient {
 		to: string,
 		text: string
 	): Promise<WhatsAppSendMessageResponse> {
-		return await this.postMessage(to, {
+		return await this.postMessage({
 			messaging_product: "whatsapp",
 			recipient_type: "individual",
 			text: {
@@ -74,7 +80,7 @@ export class WhatsAppClient {
 			);
 		}
 
-		return await this.postMessage(to, {
+		return await this.postMessage({
 			interactive: {
 				action: {
 					buttons: buttons.map((button) => ({
@@ -98,16 +104,12 @@ export class WhatsAppClient {
 	 * `unknown` e não reenvia.
 	 */
 	private async postMessage(
-		to: string,
 		payload: Record<string, unknown>
 	): Promise<WhatsAppSendMessageResponse> {
 		const signal = AbortSignal.timeout(this.sendTimeoutMs);
 
 		try {
-			return await Promise.race([
-				this.request(to, payload, signal),
-				rejectOnAbort(signal),
-			]);
+			return await this.request(payload, signal);
 		} catch (error) {
 			if (error instanceof WhatsAppSendError) {
 				throw error;
@@ -131,31 +133,39 @@ export class WhatsAppClient {
 	}
 
 	private async request(
-		to: string,
 		payload: Record<string, unknown>,
 		signal: AbortSignal
 	): Promise<WhatsAppSendMessageResponse> {
-		const response = await fetch(this.messagesUrl, {
-			body: JSON.stringify(payload),
-			headers: {
-				Authorization: `Bearer ${this.accessToken}`,
-				"Content-Type": "application/json",
-			},
-			method: "POST",
-			signal,
-		});
+		const response = await raceAbort(
+			fetch(this.messagesUrl, {
+				body: JSON.stringify(payload),
+				headers: {
+					Authorization: `Bearer ${this.accessToken}`,
+					"Content-Type": "application/json",
+				},
+				method: "POST",
+				signal,
+			}),
+			signal
+		);
 
 		if (!response.ok) {
-			const errorData = await response.text();
+			// A Meta já respondeu com erro: classifica pelo status mesmo se o
+			// corpo não chegar a tempo.
+			const errorData = await raceAbort(response.text(), signal).catch(
+				() => ""
+			);
 			console.error("[WhatsAppClient] Error sending message:", {
 				errorData,
 				status: response.status,
 				statusText: response.statusText,
-				to,
 			});
 			throw classifyWhatsAppHttpError(response.status, errorData);
 		}
 
-		return (await response.json()) as WhatsAppSendMessageResponse;
+		return (await raceAbort(
+			response.json(),
+			signal
+		)) as WhatsAppSendMessageResponse;
 	}
 }

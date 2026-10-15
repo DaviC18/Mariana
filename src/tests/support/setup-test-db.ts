@@ -2,7 +2,7 @@
 //
 // Bootstrap provisório: as migrations em `drizzle/` ainda não constroem um
 // banco vazio ("Non-commutative migrations detected"), então o schema vem de
-// `drizzle-kit push` sobre `bootstrap-schema.ts`. Só para teste; trocar por
+// `drizzle-kit push` com `drizzle.test.config.ts` (schema `bootstrap-schema.ts`). Só para teste; trocar por
 // `migrate` quando a baseline consolidada existir.
 import "dotenv/config";
 
@@ -32,20 +32,11 @@ async function main() {
 			[
 				"drizzle-kit",
 				"push",
-				"--dialect",
-				"postgresql",
-				"--schema",
-				"./src/tests/support/bootstrap-schema.ts",
-				"--url",
-				testUrl,
+				"--config",
+				"./src/tests/support/drizzle.test.config.ts",
 				"--force",
 			],
-			{
-				encoding: "utf8",
-				// `DATABASE_URL` também aponta para o banco de teste, caso o
-				// drizzle-kit caia no `drizzle.config.ts`.
-				env: { ...process.env, DATABASE_URL: testUrl },
-			}
+			{ encoding: "utf8", env: process.env }
 		);
 		if (push.status !== 0) {
 			throw new Error(

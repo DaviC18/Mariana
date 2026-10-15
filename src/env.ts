@@ -97,10 +97,8 @@ export function buildEnvInput(source: NodeJS.ProcessEnv) {
 		WHATSAPP_APP_SECRET: source.WHATSAPP_APP_SECRET,
 		WHATSAPP_GRAPH_API_VERSION: source.WHATSAPP_GRAPH_API_VERSION,
 		WHATSAPP_PHONE_NUMBER_ID: source.WHATSAPP_PHONE_NUMBER_ID,
-		WHATSAPP_SEND_TIMEOUT_MS: parseIntegerEnv(
-			source.WHATSAPP_SEND_TIMEOUT_MS,
-			15_000
-		),
+		// Valor inválido falha na validação em vez de cair no default.
+		WHATSAPP_SEND_TIMEOUT_MS: source.WHATSAPP_SEND_TIMEOUT_MS || undefined,
 		WHATSAPP_VERIFY_TOKEN: source.WHATSAPP_VERIFY_TOKEN,
 		WHATSAPP_WABA_ID: source.WHATSAPP_WABA_ID,
 	};

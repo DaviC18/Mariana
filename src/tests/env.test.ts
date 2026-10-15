@@ -94,3 +94,10 @@ test("parseEnv rejeita WHATSAPP_SEND_TIMEOUT_MS fora do intervalo seguro", () =>
 		);
 	}
 });
+
+test("parseEnv rejeita WHATSAPP_SEND_TIMEOUT_MS não numérico em vez de usar o default", () => {
+	assert.throws(
+		() => parseEnv({ ...VALID_SOURCE, WHATSAPP_SEND_TIMEOUT_MS: "20s" }),
+		WHATSAPP_SEND_TIMEOUT_ERROR
+	);
+});
