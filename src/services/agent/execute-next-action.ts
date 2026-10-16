@@ -112,6 +112,12 @@ export type ExecuteNextActionResult =
 	  };
 
 export interface ExecuteNextActionParams {
+	/**
+	 * O cliente aceitou, neste turno, a oferta sim/não de conversar com um
+	 * consultor enviada pelo backend no turno anterior. Vale como intenção
+	 * atual de agendamento somente neste turno.
+	 */
+	acceptedPendingOffer?: boolean;
 	conversationId: string;
 	currentMessages: string[];
 	currentStatus: string;
@@ -125,6 +131,7 @@ export interface ExecuteNextActionParams {
 }
 
 export async function executeNextAction({
+	acceptedPendingOffer = false,
 	conversationId,
 	currentStatus,
 	currentMessages,
@@ -150,8 +157,16 @@ export async function executeNextAction({
 	},
 }: ExecuteNextActionParams): Promise<ExecuteNextActionResult> {
 	const resolvedConversationId = conversationId;
-	const normalizedAction =
+	const requestedAction =
 		ACTION_ALIASES[nextAction as MarianaNextAction] ?? nextAction;
+	// Aceite da oferta do próprio backend decide o fluxo; o modelo não é a
+	// autoridade aqui. Encerramento continua respeitado.
+	const normalizedAction =
+		acceptedPendingOffer && requestedAction !== "close"
+			? "offer_meeting"
+			: requestedAction;
+	const schedulingIntent =
+		acceptedPendingOffer || hasCurrentSchedulingIntent(currentMessages);
 
 	if (!resolvedConversationId) {
 		throw new Error("Conversation id is required");
@@ -162,6 +177,7 @@ export async function executeNextAction({
 		event: "agent_action_started",
 		leadId,
 		nextAction: normalizedAction,
+		...(acceptedPendingOffer ? { reason: "accepted_pending_offer" } : {}),
 	});
 
 	if (normalizedAction === "continue_qualification") {
@@ -193,7 +209,7 @@ export async function executeNextAction({
 	}
 
 	if (normalizedAction === "offer_meeting") {
-		if (!hasCurrentSchedulingIntent(currentMessages)) {
+		if (!schedulingIntent) {
 			console.info({
 				conversationId: resolvedConversationId,
 				event: "agent_action_blocked",
@@ -237,7 +253,7 @@ export async function executeNextAction({
 	}
 
 	if (normalizedAction === "schedule_meeting") {
-		if (!hasCurrentSchedulingIntent(currentMessages)) {
+		if (!schedulingIntent) {
 			console.info({
 				conversationId: resolvedConversationId,
 				event: "agent_action_blocked",

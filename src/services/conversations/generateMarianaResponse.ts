@@ -392,11 +392,16 @@ export async function generateMarianaResponse({
 		lead: agentLead,
 	});
 
-	// Pergunta de fallback considera o que o modelo acabou de extrair nesta rodada.
+	// Pergunta de fallback considera o que o modelo acabou de extrair nesta rodada
+	// e nunca repete a última mensagem da assistente.
+	const previousAssistantMessage = [...previousHistory]
+		.reverse()
+		.find((message) => message.role === "assistant")?.content;
 	const fallbackReply = buildQualificationFallbackReply(
 		getMissingQualificationFields(
 			mergeQualificationInput(qualificationInput, response.result.leadUpdate)
-		)
+		),
+		previousAssistantMessage
 	);
 
 	// 8. Valida regra de negócio antes de persistir qualquer mudança de status

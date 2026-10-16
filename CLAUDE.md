@@ -33,6 +33,7 @@ Fastify + Drizzle/Postgres + Gemini + WhatsApp Cloud API. Follow these rules in 
 - A message in `unknown` is never resent without evidence.
 - The AI is never the authority on IDs, availability or authorization.
 - Confirming a slot requires that it equals the persisted `selectedSlotId`.
+- A clear affirmative that answers Mariana's own consultant offer (the `interestedInConsultant` question or `COMMERCIAL_HANDOFF`), sent in the immediately previous assistant turn, sets `interestedInConsultant = true` and authorizes offering times for that turn only. The offer is tracked by a backend-owned marker, never inferred from free text, and is cleared after one user turn (`acceptedPendingOffer` in `executeNextAction`, `acceptsPendingOffer` in `pending-offer.ts`). Status: the marker is not persisted yet (needs an approved migration), so this path is not active in production.
 
 ## Migration freeze
 

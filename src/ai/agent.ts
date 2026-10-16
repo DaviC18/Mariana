@@ -236,6 +236,7 @@ ${conversationContext ? buildConversationContextSection(conversationContext) : "
 		profile
 	);
 	const result = validateMarianaEvidence({
+		clientStatedText: currentBlockQuery,
 		commercialAccess,
 		query: latestUserMessage,
 		response: {

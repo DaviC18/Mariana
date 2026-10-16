@@ -152,3 +152,42 @@ test("merge aplica apenas valores não nulos do leadUpdate", () => {
 		"interestedInConsultant",
 	]);
 });
+
+test("pergunta de interesse no consultor pede consentimento explícito para ver horários", () => {
+	const reply = buildQualificationFallbackReply(["interestedInConsultant"]);
+
+	assert.match(reply, /horário/i);
+	assert.match(reply, /consultor/i);
+});
+
+test("fallback nunca repete a mensagem anterior da assistente", () => {
+	for (const field of QUALIFICATION_FIELDS) {
+		const previous = buildQualificationFallbackReply([field]);
+
+		for (const fields of [[field], [field, ...QUALIFICATION_FIELDS]]) {
+			const reply = buildQualificationFallbackReply(fields, previous);
+
+			assert.notEqual(reply, previous, `${field}: ${reply}`);
+			assert.ok(reply.endsWith("?"), `${field}: ${reply}`);
+		}
+	}
+
+	assert.notEqual(
+		buildQualificationFallbackReply([], DEFAULT_FALLBACK_REPLY),
+		DEFAULT_FALLBACK_REPLY
+	);
+});
+
+test("fallback repetido reformula o mesmo campo, sem pular a ordem de qualificação", () => {
+	const previous = buildQualificationFallbackReply(["painPoint"]);
+	const reply = buildQualificationFallbackReply(
+		["painPoint", "interestedInConsultant"],
+		previous
+	);
+
+	assert.notEqual(reply, previous);
+	assert.notEqual(
+		reply,
+		buildQualificationFallbackReply(["interestedInConsultant"])
+	);
+});

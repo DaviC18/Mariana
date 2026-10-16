@@ -27,12 +27,46 @@ const LEVEL_TWO_RESTRICTIONS = [
 	/\b(?:recomendo|indico|sugiro|melhor grupo|melhor carta|estrategia para voce)\b/i,
 ];
 
+// Valor monetário: "R$ 100 mil", "100 mil", "100.000 reais". Percentuais
+// nunca contam como valor informado pelo cliente.
+const MONEY_AMOUNT_PATTERN =
+	/(r\$\s*)?(\d+(?:[.,]\d+)*)(\s*(?:mil|milhao|milhoes|reais))?(?!\s*%)/gi;
+
+function isMoneyAmount(prefix?: string, unit?: string): boolean {
+	return Boolean(prefix || unit);
+}
+
+// Valores que o próprio cliente informou (ex.: "a faixa de crédito é de R$ 100
+// mil") podem ser repetidos na resposta; só valores novos violam o nível 2.
+function removeClientStatedAmounts(reply: string, clientText: string): string {
+	const statedAmounts = new Set<string>();
+
+	for (const [, prefix, value, unit] of clientText.matchAll(
+		MONEY_AMOUNT_PATTERN
+	)) {
+		if (value && isMoneyAmount(prefix, unit)) {
+			statedAmounts.add(value);
+		}
+	}
+
+	return reply.replace(
+		MONEY_AMOUNT_PATTERN,
+		(match, prefix?: string, value?: string, unit?: string) =>
+			value && isMoneyAmount(prefix, unit) && statedAmounts.has(value)
+				? " "
+				: match
+	);
+}
+
 export function validateMarianaEvidence({
+	clientStatedText,
 	query,
 	response,
 	retrieval,
 	commercialAccess,
 }: {
+	/** Texto do cliente no bloco atual; padrão: `query`. */
+	clientStatedText?: string;
 	query: string;
 	response: MarianaResponse;
 	retrieval: KnowledgeRetrievalResult;
@@ -54,9 +88,15 @@ export function validateMarianaEvidence({
 	const normalizedReply = response.reply
 		.normalize("NFD")
 		.replace(/[\u0300-\u036f]/g, "");
+	const replyWithoutClientNumbers = removeClientStatedAmounts(
+		normalizedReply,
+		(clientStatedText ?? query).normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+	);
 	const levelTwoViolation =
 		commercialAccess?.level === 2 &&
-		LEVEL_TWO_RESTRICTIONS.some((pattern) => pattern.test(normalizedReply));
+		LEVEL_TWO_RESTRICTIONS.some((pattern) =>
+			pattern.test(replyWithoutClientNumbers)
+		);
 
 	if (
 		levelTwoViolation ||

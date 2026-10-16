@@ -8,6 +8,7 @@ import {
 	persistAuthorizedAssistantReply,
 	runSchedulingOfferIfAuthorized,
 } from "../../services/conversations/generateMarianaResponse";
+import { buildQualificationFallbackReply } from "../../services/leads/qualification-gaps";
 
 const SCHEDULING_COMMITMENT_PATTERN = /horários disponíveis|verificar/i;
 
@@ -204,4 +205,24 @@ test("resposta autorizada ignora fallbackReply", async () => {
 	});
 
 	assert.equal(preparedReply.reply, modelReply);
+});
+
+test("pergunta de interesse no consultor não é tratada como compromisso de agendamento", async () => {
+	const question = buildQualificationFallbackReply(["interestedInConsultant"]);
+	const alternate = buildQualificationFallbackReply(
+		["interestedInConsultant"],
+		question
+	);
+
+	for (const reply of [question, alternate]) {
+		const prepared = await persistAuthorizedAssistantReply({
+			actionResult: { action: "continue_qualification", status: "executed" },
+			fallbackReply: "fallback",
+			persistAssistantMessage: async (content) => content,
+			reply,
+			requestedAction: "continue_qualification",
+		});
+
+		assert.equal(prepared.reply, reply);
+	}
 });

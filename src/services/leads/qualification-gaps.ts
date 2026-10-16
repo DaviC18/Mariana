@@ -32,11 +32,26 @@ const FIELD_QUESTIONS: Record<QualificationField, string> = {
 	currentSituation:
 		"Para eu entender melhor o seu momento, como está a sua situação hoje em relação a esse objetivo?",
 	interestedInConsultant:
-		"Você gostaria de conversar com um consultor para conhecer as opções com mais detalhes?",
+		"Você quer que eu procure um horário para conversar com um consultor?",
 	objective:
 		"Para eu te orientar melhor, qual é o seu principal objetivo com o consórcio?",
 	painPoint: "E o que te motivou a buscar essa conquista agora?",
 };
+
+// Reformulações usadas quando a pergunta principal acabou de ser enviada.
+const FIELD_ALTERNATE_QUESTIONS: Record<QualificationField, string> = {
+	consortiumType:
+		"Só para eu confirmar: o consórcio que você procura é para imóvel, veículo ou outro bem?",
+	currentSituation:
+		"Me conta um pouco mais: hoje, como você está em relação a esse objetivo?",
+	interestedInConsultant:
+		"Posso procurar uma data e um horário para você falar com um consultor?",
+	objective: "Me conta: o que você pretende conquistar com o consórcio?",
+	painPoint: "O que fez você querer resolver isso neste momento?",
+};
+
+const DEFAULT_ALTERNATE_FALLBACK_REPLY =
+	"Ficou alguma dúvida sobre consórcio que eu possa esclarecer?";
 
 function hasText(value: string | null | undefined): boolean {
 	return typeof value === "string" && value.trim().length > 0;
@@ -71,14 +86,21 @@ export function describeQualificationFields(
 	return fields.map((field) => FIELD_DESCRIPTIONS[field]);
 }
 
+// Nunca repete a última mensagem da assistente: usa uma reformulação do mesmo
+// campo, sem pular a ordem de qualificação, evitando loop da mesma pergunta.
 export function buildQualificationFallbackReply(
-	fields: readonly QualificationField[]
+	fields: readonly QualificationField[],
+	previousAssistantMessage?: string | null
 ): string {
 	const [firstMissingField] = fields;
+	const [primary, alternate] = firstMissingField
+		? [
+				FIELD_QUESTIONS[firstMissingField],
+				FIELD_ALTERNATE_QUESTIONS[firstMissingField],
+			]
+		: [DEFAULT_FALLBACK_REPLY, DEFAULT_ALTERNATE_FALLBACK_REPLY];
 
-	return firstMissingField
-		? FIELD_QUESTIONS[firstMissingField]
-		: DEFAULT_FALLBACK_REPLY;
+	return primary === previousAssistantMessage?.trim() ? alternate : primary;
 }
 
 const MERGEABLE_KEYS = [

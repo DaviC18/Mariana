@@ -224,3 +224,60 @@ test("solicitação negada e pergunta comercial não autorizam agendamento", asy
 		});
 	}
 });
+
+test("aceite de oferta pendente autoriza offer_meeting para lead qualificado", async () => {
+	const result = await executeNextAction({
+		acceptedPendingOffer: true,
+		conversationId: "conv-accepted-offer",
+		currentMessages: ["sim eu quero"],
+		currentStatus: "qualified",
+		leadId: "lead-accepted-offer",
+		nextAction: "offer_meeting",
+	});
+
+	assert.deepEqual(result, { action: "offer_meeting", status: "executed" });
+});
+
+test("afirmativa sem oferta pendente não autoriza offer_meeting", async () => {
+	const result = await executeNextAction({
+		conversationId: "conv-bare-yes",
+		currentMessages: ["sim eu quero"],
+		currentStatus: "qualified",
+		leadId: "lead-bare-yes",
+		nextAction: "offer_meeting",
+	});
+
+	assert.deepEqual(result, {
+		action: "continue_qualification",
+		status: "executed",
+	});
+});
+
+test("aceite de oferta pendente após request_consultant segue para offer_meeting", async () => {
+	const result = await executeNextAction({
+		acceptedPendingOffer: true,
+		conversationId: "conv-accepted-handoff",
+		currentMessages: ["sim porfavor"],
+		currentStatus: "qualified",
+		leadId: "lead-accepted-handoff",
+		nextAction: "request_consultant",
+	});
+
+	assert.deepEqual(result, { action: "offer_meeting", status: "executed" });
+});
+
+test("aceite de oferta pendente com lead não qualificado continua a qualificação", async () => {
+	const result = await executeNextAction({
+		acceptedPendingOffer: true,
+		conversationId: "conv-accepted-unqualified",
+		currentMessages: ["sim"],
+		currentStatus: "qualifying",
+		leadId: "lead-accepted-unqualified",
+		nextAction: "offer_meeting",
+	});
+
+	assert.deepEqual(result, {
+		action: "continue_qualification",
+		status: "executed",
+	});
+});
