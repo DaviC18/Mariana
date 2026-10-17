@@ -4,7 +4,7 @@
 /** biome-ignore-all assist/source/useSortedKeys: <> */
 
 import type { InferInsertModel, InferSelectModel, SQL } from "drizzle-orm";
-import { and, asc, eq, inArray, lt, lte, or } from "drizzle-orm";
+import { and, asc, eq, gt, inArray, lt, lte, or } from "drizzle-orm";
 
 import {
 	type GenerateMarianaReplyResult,
@@ -13,10 +13,17 @@ import {
 import type { BusinessProfile } from "../../ai/business-profile";
 import { COMMERCIAL_HANDOFF } from "../../ai/knowledge/commercial-policy";
 import { db } from "../../db/connections";
-import { appointments, conversations, leads, messages } from "../../db/schema";
+import {
+	appointments,
+	conversations,
+	leads,
+	messages,
+	schedulingSessions,
+} from "../../db/schema";
 import {
 	type ExecuteNextActionResult,
 	executeNextAction,
+	hasCurrentSchedulingIntent,
 	type NextAction,
 } from "../agent/execute-next-action";
 import { CONFIRMED_APPOINTMENT_STATUSES } from "../appointments/appointment-status";
@@ -26,14 +33,23 @@ import {
 	type PersistSchedulingOfferResult,
 	SchedulingOfferService,
 } from "../calendar/scheduling-offer-service";
+import { isLeadQualified } from "../leads/lead-qualification";
 import type { LeadStatus } from "../leads/lead-status";
 import {
-	buildQualificationFallbackReply,
 	DEFAULT_FALLBACK_REPLY,
-	getMissingQualificationFields,
 	mergeQualificationInput,
 } from "../leads/qualification-gaps";
 import { updateLeadFromAgent } from "../leads/update-lead-from-agent";
+import {
+	composeStageReply,
+	computeConversationStage,
+	findAskedQuestion,
+	isAlreadySaidComplaint,
+	isNameKnown,
+	reconcileLeadUpdate,
+	type StageLead,
+} from "./conversation-stage";
+import { acceptsPendingOffer, detectPendingOffer } from "./pending-offer";
 
 type PersistLeadTransactionValues = Partial<InferInsertModel<typeof leads>> & {
 	updatedAt: Date;
@@ -344,7 +360,7 @@ export async function generateMarianaResponse({
 		currentMessageIdSet.has(message.id)
 	);
 
-	// 5. Contexto do lead
+	// 5. Etapa da conversa calculada pelo backend (lead persistido + histórico)
 	const qualificationInput = {
 		birthDate: lead.birthDate,
 		consortiumType: lead.consortiumType,
@@ -353,14 +369,47 @@ export async function generateMarianaResponse({
 		objective: lead.objective,
 		painPoint: lead.painPoint,
 	};
-	const isFirstContact = !previousHistory.some(
-		(message) => message.role === "assistant"
-	);
+	const assistantHistory = previousHistory
+		.filter((message) => message.role === "assistant")
+		.map((message) => message.content);
+	const previousAssistantMessage = assistantHistory.at(-1) ?? null;
+	const isFirstContact = assistantHistory.length === 0;
+	// Marcador sem migração: texto exato do backend na mensagem anterior.
+	const pendingOffer = detectPendingOffer(previousAssistantMessage);
+	const lastAskedQuestion = previousAssistantMessage
+		? findAskedQuestion(previousAssistantMessage)
+		: null;
+	const [activeSchedulingSession] = await db
+		.select({ id: schedulingSessions.id })
+		.from(schedulingSessions)
+		.where(
+			and(
+				eq(schedulingSessions.leadId, leadId),
+				eq(schedulingSessions.status, "active"),
+				gt(schedulingSessions.expiresAt, new Date())
+			)
+		)
+		.limit(1);
+	const hasActiveSchedulingSession = Boolean(activeSchedulingSession);
+	const stageLead: StageLead = {
+		currentSituation: lead.currentSituation,
+		interestedInConsultant: lead.interestedInConsultant,
+		name: lead.name,
+		objective: lead.objective,
+		painPoint: lead.painPoint,
+		phone: lead.phone,
+		status: lead.status,
+	};
+	const turnStage = computeConversationStage({
+		assistantHistory,
+		hasActiveSchedulingSession,
+		lead: stageLead,
+	});
 	const agentLead = {
 		commercialApproach: lead.commercialApproach,
 		consortiumType: lead.consortiumType ?? "",
 		currentSituation: lead.currentSituation,
-		name: lead.name,
+		name: isNameKnown(lead.name, lead.phone) ? lead.name : "não informado",
 		objective: lead.objective ?? "",
 		painPoint: lead.painPoint,
 		status: lead.status,
@@ -380,29 +429,53 @@ export async function generateMarianaResponse({
 		role: message.role,
 	}));
 
-	// 7. Chama a IA
+	// 7. Chama a IA: ela só escreve o texto; etapa e pergunta são do backend.
 	const response = await generateMarianaReplyFn({
 		businessProfile,
 		currentMessages: agentCurrentMessages,
 		conversationContext: {
+			doNotAsk: turnStage.doNotAsk,
 			isFirstContact,
-			missingQualification: getMissingQualificationFields(qualificationInput),
+			pendingOffer,
+			question: turnStage.question,
+			stage: turnStage.stage,
 		},
 		history: agentHistory,
 		lead: agentLead,
 	});
 
-	// Pergunta de fallback considera o que o modelo acabou de extrair nesta rodada
-	// e nunca repete a última mensagem da assistente.
-	const previousAssistantMessage = [...previousHistory]
-		.reverse()
-		.find((message) => message.role === "assistant")?.content;
-	const fallbackReply = buildQualificationFallbackReply(
-		getMissingQualificationFields(
-			mergeQualificationInput(qualificationInput, response.result.leadUpdate)
-		),
-		previousAssistantMessage
-	);
+	// Extração validada pelo backend; status e interesse no consultor são
+	// decididos aqui, nunca pelo modelo.
+	const reconciledUpdate = reconcileLeadUpdate({
+		currentMessages,
+		lastAskedQuestion,
+		lead: stageLead,
+		leadUpdate: response.result.leadUpdate,
+	});
+	const mergedObjective = reconciledUpdate.objective ?? lead.objective;
+	const acceptedOffer = acceptsPendingOffer({ currentMessages, pendingOffer });
+	const reasonAnswered =
+		pendingOffer === "consultant_reason" &&
+		typeof mergedObjective === "string" &&
+		mergedObjective.trim().length > 0;
+	const wantsConsultant =
+		acceptedOffer ||
+		reasonAnswered ||
+		hasCurrentSchedulingIntent(currentMessages);
+	const interestedInConsultantUpdate = wantsConsultant ? true : undefined;
+	const baseStatus = (
+		lead.status === "new" ? "qualifying" : lead.status
+	) as LeadStatus;
+	const computedStatus: LeadStatus =
+		baseStatus === "qualifying" &&
+		isLeadQualified(
+			mergeQualificationInput(qualificationInput, {
+				...reconciledUpdate,
+				interestedInConsultant: interestedInConsultantUpdate,
+			})
+		)
+			? "qualified"
+			: baseStatus;
 
 	// 8. Valida regra de negócio antes de persistir qualquer mudança de status
 	const [existingAppointment] = await db
@@ -420,11 +493,11 @@ export async function generateMarianaResponse({
 
 	// 9. Salva resposta da Mariana e aplica a atualização do lead apenas se a transição for permitida
 	const actionResult = await db.transaction(async (tx) => {
-		let updatedLeadStatus: LeadStatus = lead.status as LeadStatus;
+		let updatedLeadStatus: LeadStatus = baseStatus;
 
 		await updateLeadFromAgent({
 			appointmentCreated,
-			currentStatus: lead.status,
+			currentStatus: baseStatus,
 			existingLead: {
 				birthDate: lead.birthDate,
 				consortiumType: lead.consortiumType,
@@ -435,12 +508,14 @@ export async function generateMarianaResponse({
 			},
 			leadId,
 			leadUpdate: {
-				...response.result.leadUpdate,
+				...reconciledUpdate,
 				birthDate:
-					response.result.leadUpdate.birthDate === undefined ||
-					response.result.leadUpdate.birthDate === null
-						? response.result.leadUpdate.birthDate
-						: new Date(response.result.leadUpdate.birthDate),
+					reconciledUpdate.birthDate === undefined ||
+					reconciledUpdate.birthDate === null
+						? reconciledUpdate.birthDate
+						: new Date(reconciledUpdate.birthDate),
+				interestedInConsultant: interestedInConsultantUpdate,
+				status: computedStatus,
 			},
 			persistLead: async ({ leadId: targetLeadId, values }) =>
 				persistLeadUpdate({
@@ -453,7 +528,15 @@ export async function generateMarianaResponse({
 			},
 		});
 
+		if (reconciledUpdate.name) {
+			await tx
+				.update(leads)
+				.set({ name: reconciledUpdate.name })
+				.where(eq(leads.id, leadId));
+		}
+
 		const nextActionResult = await executeNextAction({
+			acceptedPendingOffer: acceptedOffer || reasonAnswered,
 			conversationId: activeConversation.id,
 			currentStatus: updatedLeadStatus,
 			currentMessages,
@@ -481,6 +564,40 @@ export async function generateMarianaResponse({
 			},
 		});
 
+		// A pergunta do turno é recalculada com o que acabou de ser extraído.
+		const postTurnStage = computeConversationStage({
+			assistantHistory,
+			hasActiveSchedulingSession,
+			lead: {
+				...stageLead,
+				currentSituation:
+					reconciledUpdate.currentSituation ?? lead.currentSituation,
+				interestedInConsultant:
+					interestedInConsultantUpdate ?? lead.interestedInConsultant,
+				name: reconciledUpdate.name ?? lead.name,
+				objective: mergedObjective,
+				painPoint: reconciledUpdate.painPoint ?? lead.painPoint,
+				status: updatedLeadStatus,
+			},
+		});
+		const stageReplyInput = {
+			apologize: isAlreadySaidComplaint(currentMessages),
+			isFirstContact,
+			previousAssistantMessage,
+			question: postTurnStage.question,
+		};
+		const composedReply =
+			nextActionResult.action === "request_consultant"
+				? COMMERCIAL_HANDOFF
+				: composeStageReply({
+						...stageReplyInput,
+						modelReply: response.result.reply,
+					});
+		const fallbackReply = composeStageReply({
+			...stageReplyInput,
+			modelReply: "",
+		});
+
 		const preparedResponse = await persistAuthorizedAssistantReply({
 			actionResult: nextActionResult,
 			fallbackReply,
@@ -501,7 +618,7 @@ export async function generateMarianaResponse({
 				return assistantMessage;
 			},
 			requestedAction: response.result.nextAction,
-			reply: response.result.reply,
+			reply: composedReply,
 		});
 
 		await tx

@@ -60,6 +60,11 @@ test("nível 3 bloqueia decisões e informações comerciais específicas", () =
 		"Consórcio dá lucro?",
 		"Qual estratégia eu devo usar?",
 		"A contemplação é garantida?",
+		"quanto fica a parcela?",
+		"qual a taxa?",
+		"quanto de lance?",
+		"qual o valor da parcela de um carro?",
+		"quanto eu pago por mês?",
 	]) {
 		assert.equal(resolve(message).level, 3, message);
 	}
@@ -203,4 +208,15 @@ test("faixa informada em mensagem anterior do mesmo bloco também pode ser repet
 	});
 
 	assert.equal(validated.reply, response.reply);
+});
+
+test("valor informado pelo cliente não é pedido de simulação", () => {
+	for (const message of [
+		"quero um crédito de R$ 100 mil",
+		"tenho uns 20 mil para dar de entrada",
+		"Quais bens posso adquirir?",
+		"Qual a idade mínima?",
+	]) {
+		assert.notEqual(resolve(message).level, 3, message);
+	}
 });

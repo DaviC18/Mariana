@@ -2,30 +2,28 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { CONSULTANT_OFFER_TEXT } from "../../ai/knowledge/commercial-policy";
 import { isLeadQualified } from "../../services/leads/lead-qualification";
 import {
-	buildQualificationFallbackReply,
-	DEFAULT_FALLBACK_REPLY,
+	CONSULTANT_REASON_QUESTION,
+	CURRENT_SITUATION_QUESTION,
 	describeQualificationFields,
 	getMissingQualificationFields,
 	mergeQualificationInput,
+	NAME_QUESTION,
+	PAIN_POINT_QUESTION,
 	QUALIFICATION_FIELDS,
+	REASON_QUESTION,
 } from "../../services/leads/qualification-gaps";
 
 const QUALIFIED_LEAD = {
-	consortiumType: "veículo",
-	currentSituation: "Ainda não tenho carro",
 	interestedInConsultant: true,
 	objective: "Comprar um carro novo",
-	painPoint: "Quero sair do transporte por aplicativo",
 };
 
-test("lead vazio retorna todos os campos na ordem de qualificação", () => {
+test("lead vazio retorna os campos obrigatórios: objetivo e interesse", () => {
 	assert.deepEqual(getMissingQualificationFields({}), [
 		"objective",
-		"consortiumType",
-		"currentSituation",
-		"painPoint",
 		"interestedInConsultant",
 	]);
 	assert.deepEqual(getMissingQualificationFields({}), [
@@ -38,22 +36,13 @@ test("lead qualificado não tem pendências e espelha isLeadQualified", () => {
 	assert.equal(isLeadQualified(QUALIFIED_LEAD), true);
 });
 
-test("strings em branco contam como ausentes", () => {
+test("situação atual, motivação e tipo nunca são pendências obrigatórias", () => {
 	assert.deepEqual(
 		getMissingQualificationFields({
-			...QUALIFIED_LEAD,
-			consortiumType: "   ",
-			objective: "",
-		}),
-		["objective", "consortiumType"]
-	);
-});
-
-test("motivation satisfaz painPoint", () => {
-	assert.deepEqual(
-		getMissingQualificationFields({
-			...QUALIFIED_LEAD,
-			motivation: "Quero independência",
+			consortiumType: null,
+			currentSituation: null,
+			interestedInConsultant: true,
+			objective: "Comprar um carro",
 			painPoint: null,
 		}),
 		[]
@@ -68,26 +57,15 @@ test("interesse no consultor exige true explícito, como isLeadQualified", () =>
 		]);
 		assert.equal(isLeadQualified(lead), false);
 	}
-	assert.deepEqual(
-		getMissingQualificationFields({
-			...QUALIFIED_LEAD,
-			interestedInConsultant: "true",
-		}),
-		[]
-	);
 });
 
 test("pendências vazias equivalem a isLeadQualified sem birthDate", () => {
-	const variants = [
+	for (const lead of [
 		{},
+		{ objective: "Comprar um carro" },
+		{ interestedInConsultant: true },
 		QUALIFIED_LEAD,
-		{ ...QUALIFIED_LEAD, currentSituation: " " },
-		{ ...QUALIFIED_LEAD, painPoint: undefined },
-		{ ...QUALIFIED_LEAD, motivation: "x", painPoint: undefined },
-		{ consortiumType: "veículo", objective: "carro" },
-	];
-
-	for (const lead of variants) {
+	]) {
 		assert.equal(
 			getMissingQualificationFields(lead).length === 0,
 			isLeadQualified(lead)
@@ -97,36 +75,30 @@ test("pendências vazias equivalem a isLeadQualified sem birthDate", () => {
 
 test("descrições em pt-BR acompanham os campos na ordem recebida", () => {
 	const descriptions = describeQualificationFields([
-		"currentSituation",
+		"interestedInConsultant",
 		"objective",
 	]);
 
 	assert.equal(descriptions.length, 2);
-	assert.match(descriptions[0] ?? "", /situação atual/i);
+	assert.match(descriptions[0] ?? "", /consultor/i);
 	assert.match(descriptions[1] ?? "", /objetivo/i);
 	assert.deepEqual(describeQualificationFields([]), []);
 });
 
-test("fallback pergunta somente sobre o primeiro campo pendente e termina com ?", () => {
-	for (const field of QUALIFICATION_FIELDS) {
-		const reply = buildQualificationFallbackReply([field]);
-		assert.ok(reply.endsWith("?"), `${field}: ${reply}`);
-		assert.equal(reply.split("?").length - 1, 1, `${field}: ${reply}`);
+test("perguntas de etapa são distintas e têm exatamente uma pergunta", () => {
+	const questions = [
+		NAME_QUESTION,
+		REASON_QUESTION,
+		CONSULTANT_REASON_QUESTION,
+		CURRENT_SITUATION_QUESTION,
+		PAIN_POINT_QUESTION,
+		CONSULTANT_OFFER_TEXT,
+	];
+	assert.equal(new Set(questions).size, questions.length);
+	for (const question of questions) {
+		assert.ok(question.endsWith("?"), question);
+		assert.equal(question.split("?").length - 1, 1, question);
 	}
-
-	assert.equal(
-		buildQualificationFallbackReply(["currentSituation", "painPoint"]),
-		buildQualificationFallbackReply(["currentSituation"])
-	);
-	assert.notEqual(
-		buildQualificationFallbackReply(["objective"]),
-		buildQualificationFallbackReply(["consortiumType"])
-	);
-});
-
-test("fallback sem pendências usa a pergunta genérica", () => {
-	assert.equal(buildQualificationFallbackReply([]), DEFAULT_FALLBACK_REPLY);
-	assert.ok(DEFAULT_FALLBACK_REPLY.endsWith("?"));
 });
 
 test("merge aplica apenas valores não nulos do leadUpdate", () => {
@@ -148,46 +120,6 @@ test("merge aplica apenas valores não nulos do leadUpdate", () => {
 	assert.equal(merged.objective, "Comprar um carro");
 	assert.equal(merged.currentSituation, "Não tenho carro");
 	assert.deepEqual(getMissingQualificationFields(merged), [
-		"painPoint",
 		"interestedInConsultant",
 	]);
-});
-
-test("pergunta de interesse no consultor pede consentimento explícito para ver horários", () => {
-	const reply = buildQualificationFallbackReply(["interestedInConsultant"]);
-
-	assert.match(reply, /horário/i);
-	assert.match(reply, /consultor/i);
-});
-
-test("fallback nunca repete a mensagem anterior da assistente", () => {
-	for (const field of QUALIFICATION_FIELDS) {
-		const previous = buildQualificationFallbackReply([field]);
-
-		for (const fields of [[field], [field, ...QUALIFICATION_FIELDS]]) {
-			const reply = buildQualificationFallbackReply(fields, previous);
-
-			assert.notEqual(reply, previous, `${field}: ${reply}`);
-			assert.ok(reply.endsWith("?"), `${field}: ${reply}`);
-		}
-	}
-
-	assert.notEqual(
-		buildQualificationFallbackReply([], DEFAULT_FALLBACK_REPLY),
-		DEFAULT_FALLBACK_REPLY
-	);
-});
-
-test("fallback repetido reformula o mesmo campo, sem pular a ordem de qualificação", () => {
-	const previous = buildQualificationFallbackReply(["painPoint"]);
-	const reply = buildQualificationFallbackReply(
-		["painPoint", "interestedInConsultant"],
-		previous
-	);
-
-	assert.notEqual(reply, previous);
-	assert.notEqual(
-		reply,
-		buildQualificationFallbackReply(["interestedInConsultant"])
-	);
 });

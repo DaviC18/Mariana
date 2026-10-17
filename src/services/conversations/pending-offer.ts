@@ -1,8 +1,47 @@
 /** biome-ignore-all lint/style/useFilenamingConvention: <> */
 
-// Oferta sim/não enviada pelo backend na última mensagem da assistente.
-// Vale somente para a próxima mensagem do cliente.
-export type PendingOffer = "consultant_meeting";
+import { CONSULTANT_OFFER_TEXT } from "../../ai/knowledge/commercial-policy";
+import {
+	CONSULTANT_REASON_QUESTION,
+	LEGACY_QUESTION_TEXTS,
+} from "../leads/qualification-gaps";
+
+// Oferta enviada pelo backend na última mensagem da assistente. Vale somente
+// para a próxima mensagem do cliente.
+// - consultant_meeting: pergunta sim/não CONSULTANT_OFFER_TEXT (também no
+//   final do COMMERCIAL_HANDOFF).
+// - consultant_reason: o cliente pediu um consultor sem motivo conhecido e o
+//   backend perguntou o motivo; respondê-lo autoriza a oferta neste turno.
+export type PendingOffer = "consultant_meeting" | "consultant_reason";
+
+const CONSULTANT_OFFER_MARKERS = [
+	CONSULTANT_OFFER_TEXT,
+	...LEGACY_QUESTION_TEXTS.consultantOffer,
+];
+
+// Marcador sem migração: texto exato do backend na mensagem anterior da
+// assistente. Texto livre do modelo nunca conta.
+export function detectPendingOffer(
+	previousAssistantMessage: string | null | undefined
+): PendingOffer | null {
+	if (!previousAssistantMessage) {
+		return null;
+	}
+
+	if (
+		CONSULTANT_OFFER_MARKERS.some((marker) =>
+			previousAssistantMessage.includes(marker)
+		)
+	) {
+		return "consultant_meeting";
+	}
+
+	if (previousAssistantMessage.includes(CONSULTANT_REASON_QUESTION)) {
+		return "consultant_reason";
+	}
+
+	return null;
+}
 
 const NEGATION_OR_DEFERRAL_PATTERN =
 	/\b(?:nao|nunca|depois|talvez|mais tarde|outra hora|outro dia|agora nao|sei la|mas|porem|na verdade)\b/;

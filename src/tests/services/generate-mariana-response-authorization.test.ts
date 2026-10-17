@@ -2,13 +2,16 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { COMMERCIAL_HANDOFF } from "../../ai/knowledge/commercial-policy";
+import {
+	COMMERCIAL_HANDOFF,
+	CONSULTANT_OFFER_TEXT,
+} from "../../ai/knowledge/commercial-policy";
 import { executeNextAction } from "../../services/agent/execute-next-action";
 import {
 	persistAuthorizedAssistantReply,
 	runSchedulingOfferIfAuthorized,
 } from "../../services/conversations/generateMarianaResponse";
-import { buildQualificationFallbackReply } from "../../services/leads/qualification-gaps";
+import { LEGACY_QUESTION_TEXTS } from "../../services/leads/qualification-gaps";
 
 const SCHEDULING_COMMITMENT_PATTERN = /horários disponíveis|verificar/i;
 
@@ -208,13 +211,11 @@ test("resposta autorizada ignora fallbackReply", async () => {
 });
 
 test("pergunta de interesse no consultor não é tratada como compromisso de agendamento", async () => {
-	const question = buildQualificationFallbackReply(["interestedInConsultant"]);
-	const alternate = buildQualificationFallbackReply(
-		["interestedInConsultant"],
-		question
-	);
-
-	for (const reply of [question, alternate]) {
+	for (const reply of [
+		CONSULTANT_OFFER_TEXT,
+		COMMERCIAL_HANDOFF,
+		...LEGACY_QUESTION_TEXTS.consultantOffer,
+	]) {
 		const prepared = await persistAuthorizedAssistantReply({
 			actionResult: { action: "continue_qualification", status: "executed" },
 			fallbackReply: "fallback",

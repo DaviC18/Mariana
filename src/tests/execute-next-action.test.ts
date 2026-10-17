@@ -36,12 +36,64 @@ test("offer_meeting retorna status executed", async () => {
 	});
 });
 
-test("pedido de consultor não é convertido em oferta de reunião", async () => {
+// Pedido explícito de consultor é intenção de agendamento (decisão 4).
+test("pedido explícito de consultor vira oferta de horários para lead qualificado", async () => {
+	for (const message of [
+		"Quero falar com um consultor",
+		"eu posso falar com o consultor?",
+		"quero atendimento humano",
+		"posso conversar com uma pessoa?",
+		"quero marcar uma conversa",
+		"quero ver os horários",
+	]) {
+		for (const nextAction of [
+			"request_consultant",
+			"continue_qualification",
+		] as const) {
+			const result = await executeNextAction({
+				conversationId: "conv-consultant",
+				currentMessages: [message],
+				currentStatus: "qualified",
+				leadId: "lead-consultant",
+				nextAction,
+			});
+
+			assert.deepEqual(
+				result,
+				{ action: "offer_meeting", status: "executed" },
+				`${message} / ${nextAction}`
+			);
+		}
+	}
+});
+
+test("pedido de consultor negado não vira oferta", async () => {
+	for (const message of [
+		"não quero falar com consultor",
+		"nao preciso falar com um consultor agora",
+	]) {
+		const result = await executeNextAction({
+			conversationId: "conv-consultant-negated",
+			currentMessages: [message],
+			currentStatus: "qualified",
+			leadId: "lead-consultant-negated",
+			nextAction: "continue_qualification",
+		});
+
+		assert.deepEqual(
+			result,
+			{ action: "continue_qualification", status: "executed" },
+			message
+		);
+	}
+});
+
+test("pergunta sensível sem pedido explícito continua handoff", async () => {
 	const result = await executeNextAction({
-		conversationId: "conv-consultant",
-		currentMessages: ["Quero falar com um consultor"],
+		conversationId: "conv-sensitive",
+		currentMessages: ["quanto fica a parcela?"],
 		currentStatus: "qualified",
-		leadId: "lead-consultant",
+		leadId: "lead-sensitive",
 		nextAction: "request_consultant",
 	});
 
@@ -49,6 +101,21 @@ test("pedido de consultor não é convertido em oferta de reunião", async () =>
 		action: "request_consultant",
 		status: "executed",
 	});
+});
+
+test("close continua close mesmo com pedido explícito", async () => {
+	const result = await executeNextAction({
+		conversationId: "conv-close-intent",
+		currentMessages: ["quero falar com um consultor"],
+		currentStatus: "qualified",
+		leadId: "lead-close-intent",
+		nextAction: "close",
+		persistConversationStatus: async ({ conversationId }) => ({
+			id: conversationId,
+		}),
+	});
+
+	assert.deepEqual(result, { action: "close", status: "executed" });
 });
 
 test("schedule_meeting retorna status pending sem criar appointment", async () => {

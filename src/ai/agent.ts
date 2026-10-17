@@ -5,14 +5,12 @@
 
 import type { GenerateContentResponse } from "@google/genai";
 import { z } from "zod";
+import type { ConversationStage } from "../services/conversations/conversation-stage";
 import {
 	assertSafeMarianaReply,
 	sanitizeCommercialIdentity,
 } from "../services/conversations/mariana-safety";
-import {
-	describeQualificationFields,
-	type QualificationField,
-} from "../services/leads/qualification-gaps";
+import type { PendingOffer } from "../services/conversations/pending-offer";
 import {
 	type BusinessProfile,
 	resolveBusinessProfile,
@@ -57,8 +55,13 @@ export interface MarianaLead {
 }
 
 export interface MarianaConversationContext {
+	/** Campos conhecidos e perguntas já feitas: nunca perguntar de novo. */
+	doNotAsk: string[];
 	isFirstContact: boolean;
-	missingQualification: QualificationField[];
+	pendingOffer: PendingOffer | null;
+	/** Pergunta que a aplicação acrescenta ao final da resposta, se houver. */
+	question: string | null;
+	stage: ConversationStage;
 }
 
 export interface GenerateMarianaReplyParams {
@@ -79,40 +82,71 @@ export interface GenerateMarianaReplyResult {
 	result: MarianaResponse;
 }
 
+const STAGE_GUIDANCE: Record<ConversationStage, string> = {
+	confirmation:
+		"O agendamento já foi confirmado. Responda de forma breve, sem novas perguntas comerciais.",
+	consultant_offer:
+		"O motivo do cliente já está claro. Responda brevemente; a aplicação acrescenta a oferta do consultor.",
+	greeting:
+		"Primeiro contato: cumprimente uma única vez, de forma breve, e se apresente como Mariana em uma frase.",
+	info: "Responda dúvidas gerais com a base autorizada, em no máximo 3 frases.",
+	name: "O nome do cliente ainda não é conhecido; a aplicação pergunta o nome.",
+	reason:
+		"O motivo do contato ainda não é conhecido; a aplicação pergunta o motivo.",
+	scheduling:
+		"O cliente quer falar com um consultor. A aplicação apresenta os horários; não invente horários nem prometa agendamento.",
+};
+
 export function buildConversationContextSection({
+	doNotAsk,
 	isFirstContact,
-	missingQualification,
+	pendingOffer,
+	question,
+	stage,
 }: MarianaConversationContext): string {
 	const greetingRule = isFirstContact
 		? "Este é o primeiro contato da Mariana nesta conversa: cumprimente o cliente uma única vez, de forma breve."
 		: 'A conversa já está em andamento: NÃO cumprimente novamente (sem "Olá", "Oi", "Boa noite" etc.) e vá direto ao ponto.';
 
-	const pendingSection =
-		missingQualification.length > 0
+	const questionRule = question
+		? `A aplicação vai acrescentar ao final da sua mensagem exatamente esta pergunta: "${question}". Não escreva nenhuma pergunta: escreva no máximo 2 frases curtas que combinem com ela.`
+		: "Não há pergunta da aplicação neste turno. Não escreva perguntas de qualificação; responda em no máximo 3 frases curtas.";
+
+	const doNotAskSection =
+		doNotAsk.length > 0
 			? [
-					"Campos de qualificação ainda pendentes, nesta ordem:",
-					...describeQualificationFields(missingQualification).map(
-						(description, index) => `${index + 1}. ${description}`
-					),
-					"",
-					"Enquanto houver qualquer campo pendente, use nextAction `continue_qualification` ou `answer_basic_question`. Nunca use `offer_meeting`, `offer_appointment`, `schedule_meeting` ou `wait_for_schedule`, e não mencione agenda, horários ou reunião no texto.",
+					"Nunca pergunte de novo:",
+					...doNotAsk.map((item) => `- ${item}`),
 				].join("\n")
-			: "Todos os campos obrigatórios de qualificação já foram preenchidos.";
+			: "";
+
+	const pendingOfferRule =
+		pendingOffer === "consultant_meeting"
+			? "Sua mensagem anterior ofereceu procurar um horário com um consultor. Se o cliente aceitou, a aplicação apresentará os horários."
+			: "";
 
 	return `
 # CONTEXTO DA CONVERSA
 
+Etapa atual: ${stage}. ${STAGE_GUIDANCE[stage]}
+
 ${greetingRule}
 
-${pendingSection}
+${questionRule}
 
-Antes de perguntar algo, confira o histórico: nunca pergunte novamente uma informação que o cliente já respondeu. Se a resposta estiver no histórico ou na mensagem atual, registre-a em \`leadUpdate\` e siga para o próximo campo pendente.
+${doNotAskSection}
 
-Respostas como "carro", "veículo", "moto", "casa", "apartamento" ou "imóvel" já informam tanto o objetivo quanto o tipo de consórcio. Registre os dois em \`leadUpdate\` e não pergunte nenhum deles de novo.
+${pendingOfferRule}
 
-Faça no máximo uma pergunta por mensagem.
+Uma mensagem do cliente pode responder vários campos ao mesmo tempo: registre todos em \`leadUpdate\`. Ex.: "tenho um carro usado e quero um novo" → \`currentSituation\` = "tem um carro usado" e \`objective\` = "comprar um carro novo". Situação atual (o que o cliente tem ou vive hoje) não é motivação (\`painPoint\`, por que quer agora).
 
-Se o cliente perguntar "o que você me indica?" ou algo parecido, dê uma explicação breve e geral sobre como o consórcio funciona para o objetivo dele, sem recomendar grupo, carta de crédito ou valores, e em seguida faça a próxima pergunta pendente.
+Respostas como "carro", "veículo", "moto", "casa", "apartamento" ou "imóvel" já informam o objetivo e o tipo de consórcio. Registre os dois em \`leadUpdate\`.
+
+Se o nome do cliente ainda não for conhecido e ele o informar, registre-o em \`leadUpdate.name\`.
+
+Se o cliente disser que já respondeu ("já disse isso"), peça desculpa em poucas palavras e avance.
+
+Se o cliente perguntar "o que você me indica?" ou algo parecido, dê uma explicação breve e geral sobre como o consórcio funciona para o objetivo dele, sem recomendar grupo, carta de crédito ou valores.
 `;
 }
 

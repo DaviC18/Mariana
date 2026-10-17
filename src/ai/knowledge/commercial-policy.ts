@@ -16,6 +16,12 @@ const hasAny = (value: string, terms: readonly string[]) =>
 const SPECIFIC_AMOUNT_PATTERN =
 	/\b\d+(?:[.,]\d+)?\s*(?:%|mil|milhao|milhoes|reais|r\$)?\b/;
 const PERCENTAGE_PATTERN = /\b\d+\s*%/;
+// Perguntas de valor ("quanto fica a parcela?", "qual a taxa?", "quanto de
+// lance?"). Valores que o próprio cliente informa não começam com quanto/qual.
+const VALUE_QUESTION_PATTERNS = [
+	/\bquanto\b[^.?!]{0,30}\b(?:parcelas?|taxas?|lances?|juros|credito|carta|pagar|pago|fica|sai|custa)\b/,
+	/\bqual\b[^.?!]{0,20}\b(?:valor|parcelas?|taxas?|lances?|juros)\b/,
+];
 
 function isSpecificAmountQuestion(message: string): boolean {
 	return (
@@ -34,6 +40,7 @@ function isLevelThreeQuestion(message: string): string | undefined {
 			"valor de parcela",
 			"parcela mensal",
 		]) ||
+		VALUE_QUESTION_PATTERNS.some((pattern) => pattern.test(message)) ||
 		isSpecificAmountQuestion(message)
 	) {
 		return "solicitação de valor, parcela ou simulação específica";
@@ -195,8 +202,13 @@ export function resolveCommercialAccess({
 	return { level: 1, reason: "informação geral autorizada" };
 }
 
-export const COMMERCIAL_HANDOFF =
-	"Essa é uma questão específica da operação e precisa ser analisada por um consultor. Posso encaminhar você para esse atendimento.";
+// Pergunta fixa de oferta do consultor. Sempre vem do backend; o modelo
+// nunca a escreve. O aceite é reconhecido por este texto exato na última
+// mensagem da assistente (pending-offer.ts).
+export const CONSULTANT_OFFER_TEXT =
+	"Você quer que eu procure um horário para conversar com um consultor?";
+
+export const COMMERCIAL_HANDOFF = `Essa é uma questão específica da operação e precisa ser analisada por um consultor. ${CONSULTANT_OFFER_TEXT}`;
 
 export const LEVEL_TWO_INSTRUCTION =
 	"Responda apenas o conceito geral. Não informe números, percentuais, simulações, condições específicas ou recomendações personalizadas. Encaminhe detalhes operacionais a um consultor.";

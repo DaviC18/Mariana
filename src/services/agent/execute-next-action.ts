@@ -60,7 +60,13 @@ const CURRENT_SCHEDULING_INTENT_PATTERNS = [
 	/\b(?:quais|que)\s+(?:(?:sao|estao)\s+)?(?:os?\s+)?horarios?.*(?:disponiveis|disponivel|agenda|livre|livres|reuniao)\b/,
 	/\b(?:passar|enviar|mostrar|dar)\s+(?:(?:os?|alguns?)\s+)?(?:horarios?|disponibilidade|agenda|horario)\b/,
 	/\b(?:pode(?:ria)?|consegue|conseguiria)\b.*(?:passar|mandar|enviar|mostrar|dar)\b.*(?:horarios?|disponibilidade|agenda|horario|reuniao)\b/,
+	// Pedido explícito de atendimento por uma pessoa.
+	/\b(?:falar|conversar)\s+com\s+(?:(?:um|uma|o|a|algum|alguma|seu|sua)\s+)?(?:consultor|consultora|atendente|humano|pessoa|especialista|vendedor|vendedora)\b/,
+	/\batendimento\s+(?:humano|com\s+(?:um|uma|o|a)?\s*(?:consultor|consultora|pessoa))\b/,
 ];
+
+const NEGATED_CONSULTANT_REQUEST_PATTERN =
+	/\b(?:nao|nunca)\s+(?:(?:quero|queria|gostaria(?:\s+de)?|preciso(?:\s+de)?|pretendo|vou|posso)\s+)?(?:falar|conversar|atendimento)\b/;
 
 const NEGATED_SCHEDULING_INTENT_PATTERN =
 	/\b(?:nao|nunca)\s+(?:(?:quero|queria|gostaria(?:\s+de)?|preciso(?:\s+de)?|pretendo|vou|posso)\s+)?(?:agendar|marcar|reservar|ver|consultar|conferir|checar|saber|receber)\b[^.!?]{0,40}\b(?:horarios?|disponibilidade|agenda|reuniao|conversa|atendimento|consulta|vaga)\b|\b(?:nao|nunca)\s+(?:(?:quero|queria|gostaria(?:\s+de)?|preciso(?:\s+de)?|pretendo|vou|posso)\s+)?(?:agendar|marcar|reservar)\b/;
@@ -78,6 +84,7 @@ export function hasCurrentSchedulingIntent(currentMessages: string[]): boolean {
 
 		if (
 			NEGATED_SCHEDULING_INTENT_PATTERN.test(normalizedMessage) ||
+			NEGATED_CONSULTANT_REQUEST_PATTERN.test(normalizedMessage) ||
 			NON_SCHEDULING_HORARIO_PATTERN.test(normalizedMessage)
 		) {
 			return false;
@@ -87,6 +94,30 @@ export function hasCurrentSchedulingIntent(currentMessages: string[]): boolean {
 			pattern.test(normalizedMessage)
 		);
 	});
+}
+
+// Aceite da oferta do próprio backend ou pedido explícito do cliente decidem
+// o fluxo; o modelo não é a autoridade aqui. Encerramento continua respeitado
+// e schedule_meeting segue o caminho próprio.
+function resolveAuthorizedAction({
+	acceptedPendingOffer,
+	explicitRequest,
+	requestedAction,
+}: {
+	acceptedPendingOffer: boolean;
+	explicitRequest: boolean;
+	requestedAction: MarianaResponse["nextAction"];
+}): MarianaResponse["nextAction"] {
+	if (requestedAction === "close") {
+		return requestedAction;
+	}
+	if (
+		acceptedPendingOffer ||
+		(explicitRequest && requestedAction !== "schedule_meeting")
+	) {
+		return "offer_meeting";
+	}
+	return requestedAction;
 }
 
 export type ExecuteNextActionResult =
@@ -159,14 +190,13 @@ export async function executeNextAction({
 	const resolvedConversationId = conversationId;
 	const requestedAction =
 		ACTION_ALIASES[nextAction as MarianaNextAction] ?? nextAction;
-	// Aceite da oferta do próprio backend decide o fluxo; o modelo não é a
-	// autoridade aqui. Encerramento continua respeitado.
-	const normalizedAction =
-		acceptedPendingOffer && requestedAction !== "close"
-			? "offer_meeting"
-			: requestedAction;
-	const schedulingIntent =
-		acceptedPendingOffer || hasCurrentSchedulingIntent(currentMessages);
+	const explicitRequest = hasCurrentSchedulingIntent(currentMessages);
+	const normalizedAction = resolveAuthorizedAction({
+		acceptedPendingOffer,
+		explicitRequest,
+		requestedAction,
+	});
+	const schedulingIntent = acceptedPendingOffer || explicitRequest;
 
 	if (!resolvedConversationId) {
 		throw new Error("Conversation id is required");

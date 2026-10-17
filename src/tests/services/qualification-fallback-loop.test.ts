@@ -1,4 +1,5 @@
 /** biome-ignore-all lint/suspicious/useAwait: <> */
+/** biome-ignore-all lint/performance/useTopLevelRegex: <> */
 import assert from "node:assert/strict";
 import test from "node:test";
 
@@ -9,12 +10,14 @@ import { closeDatabase, db } from "../../db/connections";
 import { conversations, leads, messages } from "../../db/schema";
 import { SchedulingAvailabilityService } from "../../services/calendar/scheduling-availability";
 import { generateMarianaResponse } from "../../services/conversations/generateMarianaResponse";
-import { buildQualificationFallbackReply } from "../../services/leads/qualification-gaps";
+import { PAIN_POINT_QUESTION } from "../../services/leads/qualification-gaps";
 
 test.after(async () => {
 	await closeDatabase();
 });
 
+// "sim" sem oferta pendente na mensagem anterior não autoriza horários e a
+// resposta nunca repete a última pergunta da assistente.
 test("offer_meeting bloqueado não repete a última pergunta da assistente", async () => {
 	const [lead] = await db
 		.insert(leads)
@@ -24,7 +27,6 @@ test("offer_meeting bloqueado não repete a última pergunta da assistente", asy
 			interestedInConsultant: false,
 			name: "Lead Loop Fallback",
 			objective: "Comprar um imóvel",
-			painPoint: "Quero parar de pagar aluguel",
 			phone: `551193${Date.now().toString().slice(-8)}`,
 			status: "qualifying",
 		})
@@ -39,17 +41,14 @@ test("offer_meeting bloqueado não repete a última pergunta da assistente", asy
 
 	assert.ok(conversation);
 
-	const consultantQuestion = buildQualificationFallbackReply([
-		"interestedInConsultant",
-	]);
 	const base = Date.now() - 60_000;
 
 	await db.insert(messages).values(
 		[
 			{ content: "a faixa de credito é de R$ 100 mil", role: "user" as const },
 			{ content: COMMERCIAL_HANDOFF, role: "assistant" as const },
-			{ content: "sim porfavor", role: "user" as const },
-			{ content: consultantQuestion, role: "assistant" as const },
+			{ content: "não, agora não", role: "user" as const },
+			{ content: PAIN_POINT_QUESTION, role: "assistant" as const },
 		].map((message, index) => ({
 			...message,
 			conversationId: conversation.id,
@@ -77,8 +76,10 @@ test("offer_meeting bloqueado não repete a última pergunta da assistente", asy
 			schedulingAvailabilityService,
 		});
 
-		assert.notEqual(result.result.reply, consultantQuestion);
-		assert.notEqual(result.assistantMessage?.content, consultantQuestion);
+		assert.equal(result.schedulingOffer, undefined);
+		assert.notEqual(result.result.reply, PAIN_POINT_QUESTION);
+		assert.doesNotMatch(result.result.reply, /verificar os horários/);
+		assert.equal(result.assistantMessage?.content, result.result.reply);
 	} finally {
 		await db
 			.delete(messages)

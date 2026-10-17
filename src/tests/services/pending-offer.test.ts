@@ -2,9 +2,15 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+	COMMERCIAL_HANDOFF,
+	CONSULTANT_OFFER_TEXT,
+} from "../../ai/knowledge/commercial-policy";
+import {
 	acceptsPendingOffer,
+	detectPendingOffer,
 	isClearAffirmative,
 } from "../../services/conversations/pending-offer";
+import { CONSULTANT_REASON_QUESTION } from "../../services/leads/qualification-gaps";
 
 const AFFIRMATIVES = [
 	"sim",
@@ -91,4 +97,23 @@ test("bloco com afirmativa e negação não aceita a oferta", () => {
 		}),
 		false
 	);
+});
+
+test("marcador vem do texto exato do backend na última mensagem da assistente", () => {
+	assert.equal(
+		detectPendingOffer(`Entendi! ${CONSULTANT_OFFER_TEXT}`),
+		"consultant_meeting"
+	);
+	assert.equal(detectPendingOffer(COMMERCIAL_HANDOFF), "consultant_meeting");
+	assert.equal(
+		detectPendingOffer(`Claro! ${CONSULTANT_REASON_QUESTION}`),
+		"consultant_reason"
+	);
+	assert.equal(
+		detectPendingOffer(
+			"Você gostaria de conversar com um consultor especializado?"
+		),
+		null
+	);
+	assert.equal(detectPendingOffer(undefined), null);
 });

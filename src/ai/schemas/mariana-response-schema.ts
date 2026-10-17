@@ -44,6 +44,7 @@ export const marianaResponseSchema = z.object({
 		currentSituation: z.string().trim().min(1).nullable().optional(),
 		interestedInConsultant: z.boolean().optional(),
 		motivation: z.string().trim().min(1).nullable().optional(),
+		name: z.string().trim().min(1).max(80).nullable().optional(),
 		objective: z.string().trim().min(1).nullable().optional(),
 		painPoint: z.string().trim().min(1).nullable().optional(),
 		status: marianaLeadStatus,
