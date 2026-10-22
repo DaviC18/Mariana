@@ -2,6 +2,12 @@
 /** biome-ignore-all lint/correctness/noUndeclaredVariables: <> */
 /** biome-ignore-all lint/correctness/noUnusedVariables: <> */
 /** biome-ignore-all assist/source/useSortedKeys: <> */
+/**
+ * biome-ignore-all lint/complexity/noExcessiveCognitiveComplexity: o try/catch
+ * do turno inteiro (decisão P-4 do plano) soma 3 pontos a uma função que já
+ * estava no limite de 20. Dividir `generateMarianaResponse` é refatoração de
+ * comportamento, fora do escopo deste passo.
+ */
 
 import type { InferInsertModel, InferSelectModel, SQL } from "drizzle-orm";
 import { and, asc, eq, gt, inArray, lt, lte, or } from "drizzle-orm";
@@ -9,9 +15,11 @@ import { and, asc, eq, gt, inArray, lt, lte, or } from "drizzle-orm";
 import {
 	type GenerateMarianaReplyResult,
 	generateMarianaReply,
+	type TurnRewritesCarrier,
 } from "../../ai/agent";
 import type { BusinessProfile } from "../../ai/business-profile";
 import { COMMERCIAL_HANDOFF } from "../../ai/knowledge/commercial-policy";
+import { ModelUnavailableError } from "../../ai/model-errors";
 import { db } from "../../db/connections";
 import {
 	appointments,
@@ -20,6 +28,16 @@ import {
 	messages,
 	schedulingSessions,
 } from "../../db/schema";
+import { env } from "../../env";
+import {
+	buildRewriteRecord,
+	hashText,
+	isPureBackendText,
+	logTurnTrace,
+	type RewriteLayer,
+	type RewriteRecord,
+	type TurnOutcome,
+} from "../../lib/turn-trace";
 import {
 	type ExecuteNextActionResult,
 	executeNextAction,
@@ -42,6 +60,7 @@ import {
 import { updateLeadFromAgent } from "../leads/update-lead-from-agent";
 import {
 	composeStageReply,
+	composeStageReplyWithTrace,
 	computeConversationStage,
 	findAskedQuestion,
 	isAlreadySaidComplaint,
@@ -65,6 +84,8 @@ export interface GenerateMarianaResponseParams {
 	persistUserMessage?: boolean;
 	schedulingAvailabilityService?: SchedulingAvailabilityService;
 	schedulingOfferService?: SchedulingOfferService;
+	/** Id da task âncora do turno; vai para o rastro como `turnId`. */
+	traceTurnId?: string;
 }
 
 export interface GenerateMarianaResponseResult {
@@ -231,6 +252,8 @@ export async function persistAuthorizedAssistantReply<AssistantMessage>({
 	actionResult: ExecuteNextActionResult;
 	assistantMessage: AssistantMessage;
 	reply: string;
+	/** L5 ou L10, quando a autorização trocou o texto do modelo. */
+	rewrites: RewriteRecord[];
 	shouldOfferSlots: boolean;
 }> {
 	const shouldOfferSlots =
@@ -241,16 +264,30 @@ export async function persistAuthorizedAssistantReply<AssistantMessage>({
 		(actionResult.action === "schedule_meeting" &&
 			actionResult.status === "pending");
 	let authorizedReply = reply;
+	const rewrites: RewriteRecord[] = [];
 
 	if (
 		!schedulingAuthorized &&
 		(requestsSchedulingAction(requestedAction) ||
 			hasSchedulingCommitment(reply))
 	) {
-		authorizedReply =
-			actionResult.action === "request_consultant"
-				? COMMERCIAL_HANDOFF
-				: fallbackReply?.trim() || DEFAULT_FALLBACK_REPLY;
+		const isHandoff = actionResult.action === "request_consultant";
+
+		authorizedReply = isHandoff
+			? COMMERCIAL_HANDOFF
+			: fallbackReply?.trim() || DEFAULT_FALLBACK_REPLY;
+
+		if (authorizedReply !== reply) {
+			rewrites.push(
+				buildRewriteRecord(
+					isHandoff
+						? "L5_request_consultant_override"
+						: "L10_unauthorized_scheduling",
+					reply,
+					authorizedReply
+				)
+			);
+		}
 	}
 
 	const assistantMessage = await persistAssistantMessage(authorizedReply);
@@ -259,6 +296,7 @@ export async function persistAuthorizedAssistantReply<AssistantMessage>({
 		actionResult,
 		assistantMessage,
 		reply: authorizedReply,
+		rewrites,
 		shouldOfferSlots,
 	};
 }
@@ -274,6 +312,120 @@ export async function runSchedulingOfferIfAuthorized<Result>(
 	return await runSchedulingOffer();
 }
 
+interface TurnTraceContext {
+	actionBlockedReason: string | null;
+	conversationId: string;
+	executedAction: string;
+	guardrailLayer: RewriteLayer | null;
+	leadId: string;
+	metadata?: Partial<GenerateMarianaReplyResult["metadata"]>;
+	outcome: TurnOutcome;
+	postTurnStage: string;
+	questionKey: string | null;
+	rawReplyText: string | null;
+	requestedNextAction: string;
+	/** `null` = o produtor não reportou; `[]` = nenhuma camada mudou o texto. */
+	rewrites: RewriteRecord[] | null;
+	sentReplyText: string | null;
+	stage: string;
+	turnId: string;
+}
+
+/**
+ * Linha de um turno que lançou fora dos guardrails (decisão P-4). O modelo
+ * pode ter respondido antes da falha, então o que existe dele é reportado e o
+ * resto fica `null` — nada é inventado.
+ */
+function emitFailureTrace(context: {
+	conversationId: string;
+	error: unknown;
+	leadId: string;
+	postTurnStage: string;
+	questionKey: string | null;
+	response: GenerateMarianaReplyResult | undefined;
+	stage: string;
+	turnId: string;
+}): void {
+	const { error, response } = context;
+
+	emitTurnTrace({
+		actionBlockedReason: null,
+		conversationId: context.conversationId,
+		executedAction: "none",
+		guardrailLayer: null,
+		leadId: context.leadId,
+		metadata: response?.metadata,
+		// Falha do modelo tem desfecho próprio; o resto é `turn_error`.
+		outcome:
+			error instanceof ModelUnavailableError ? "model_error" : "turn_error",
+		postTurnStage: context.postTurnStage,
+		questionKey: context.questionKey,
+		rawReplyText: response?.result.reply ?? null,
+		requestedNextAction:
+			response?.metadata.requestedNextAction ??
+			response?.result.nextAction ??
+			"unknown",
+		rewrites: response?.metadata.rewrites ?? null,
+		sentReplyText: null,
+		stage: context.stage,
+		turnId: context.turnId,
+	});
+}
+
+/** O motivo do bloqueio existe só na variante rebaixada (decisão P-5). */
+function blockedReasonOf(result: ExecuteNextActionResult): string | null {
+	return "blockedReason" in result ? (result.blockedReason ?? null) : null;
+}
+
+// Uma linha por turno. Só comprimentos e hashes de texto da própria Mariana:
+// nada do que o cliente escreveu, e nunca o telefone.
+function emitTurnTrace(context: TurnTraceContext): void {
+	const { metadata, rawReplyText, rewrites, sentReplyText } = context;
+	const usage = metadata?.usage ?? null;
+
+	logTurnTrace({
+		actionBlockedReason: context.actionBlockedReason,
+		commercialAccessLevel: metadata?.commercialAccessLevel ?? null,
+		conversationId: context.conversationId,
+		executedAction: context.executedAction,
+		finishReason: metadata?.finishReason ?? null,
+		guardrailLayer: context.guardrailLayer,
+		// C-2: nenhuma medição não é latência zero.
+		latencyMs: metadata?.latencyMs ?? null,
+		leadId: context.leadId,
+		maxOutputTokens: env.GEMINI_MAX_OUTPUT_TOKENS,
+		model: env.GEMINI_MODEL,
+		modelVersionReturned: metadata?.modelVersionReturned ?? null,
+		outcome: context.outcome,
+		postTurnStage: context.postTurnStage,
+		// Indecidível quando ninguém reportou as camadas: nunca `false` por omissão.
+		pureBackendText:
+			rewrites === null || rawReplyText === null || sentReplyText === null
+				? null
+				: isPureBackendText(rawReplyText, sentReplyText, rewrites),
+		questionKey: context.questionKey,
+		// C-3: sem relato do produtor o hash "cru" seria o texto pós-L1/L3.
+		// Um hash ausente não engana; um hash mal rotulado engana.
+		rawReplyHash: metadata?.rawReplyHash ?? null,
+		rawReplyLength: metadata?.rawReplyLength ?? null,
+		requestedNextAction: context.requestedNextAction,
+		rewrites,
+		rewritesReported: rewrites !== null,
+		sentReplyHash: sentReplyText === null ? null : hashText(sentReplyText),
+		sentReplyLength: sentReplyText?.length ?? null,
+		stage: context.stage,
+		temperature: env.GEMINI_TEMPERATURE,
+		thinkingLevel: env.GEMINI_THINKING_LEVEL,
+		turnId: context.turnId,
+		usage: {
+			candidatesTokens: usage?.candidatesTokenCount ?? null,
+			promptTokens: usage?.promptTokenCount ?? null,
+			thoughtsTokens: usage?.thoughtsTokenCount ?? null,
+			totalTokens: usage?.totalTokenCount ?? null,
+		},
+	});
+}
+
 export async function generateMarianaResponse({
 	businessProfile,
 	leadId,
@@ -284,6 +436,7 @@ export async function generateMarianaResponse({
 	schedulingAvailabilityService = new SchedulingAvailabilityService(),
 	schedulingOfferService = new SchedulingOfferService(),
 	generateMarianaReplyFn = generateMarianaReply,
+	traceTurnId,
 }: GenerateMarianaResponseParams): Promise<GenerateMarianaResponseResult> {
 	// 1. Busca o lead
 	const [lead] = await db
@@ -429,279 +582,401 @@ export async function generateMarianaResponse({
 		role: message.role,
 	}));
 
-	// 7. Chama a IA: ela só escreve o texto; etapa e pergunta são do backend.
-	const response = await generateMarianaReplyFn({
-		businessProfile,
-		currentMessages: agentCurrentMessages,
-		conversationContext: {
-			doNotAsk: turnStage.doNotAsk,
-			isFirstContact,
-			pendingOffer,
-			question: turnStage.question,
-			stage: turnStage.stage,
-		},
-		history: agentHistory,
-		lead: agentLead,
-	});
+	const turnId = traceTurnId ?? activeConversation.id;
+	const traceBase = {
+		conversationId: activeConversation.id,
+		leadId,
+		stage: turnStage.stage,
+	};
+	// P-4: o turno inteiro fica dentro do try. Um turno que morre depois da
+	// chamada ao modelo (calendário, banco, transação) emitia zero linhas.
+	let traceEmitted = false;
+	let turnResponse: GenerateMarianaReplyResult | undefined;
 
-	// Extração validada pelo backend; status e interesse no consultor são
-	// decididos aqui, nunca pelo modelo.
-	const reconciledUpdate = reconcileLeadUpdate({
-		currentMessages,
-		lastAskedQuestion,
-		lead: stageLead,
-		leadUpdate: response.result.leadUpdate,
-	});
-	const mergedObjective = reconciledUpdate.objective ?? lead.objective;
-	const acceptedOffer = acceptsPendingOffer({ currentMessages, pendingOffer });
-	const reasonAnswered =
-		pendingOffer === "consultant_reason" &&
-		typeof mergedObjective === "string" &&
-		mergedObjective.trim().length > 0;
-	const wantsConsultant =
-		acceptedOffer ||
-		reasonAnswered ||
-		hasCurrentSchedulingIntent(currentMessages);
-	const interestedInConsultantUpdate = wantsConsultant ? true : undefined;
-	const baseStatus = (
-		lead.status === "new" ? "qualifying" : lead.status
-	) as LeadStatus;
-	const computedStatus: LeadStatus =
-		baseStatus === "qualifying" &&
-		isLeadQualified(
-			mergeQualificationInput(qualificationInput, {
-				...reconciledUpdate,
-				interestedInConsultant: interestedInConsultantUpdate,
-			})
-		)
-			? "qualified"
-			: baseStatus;
-
-	// 8. Valida regra de negócio antes de persistir qualquer mudança de status
-	const [existingAppointment] = await db
-		.select({ id: appointments.id })
-		.from(appointments)
-		.where(
-			and(
-				eq(appointments.leadId, leadId),
-				inArray(appointments.status, CONFIRMED_APPOINTMENT_STATUSES)
-			)
-		)
-		.limit(1);
-
-	const appointmentCreated = Boolean(existingAppointment);
-
-	// 9. Salva resposta da Mariana e aplica a atualização do lead apenas se a transição for permitida
-	const actionResult = await db.transaction(async (tx) => {
-		let updatedLeadStatus: LeadStatus = baseStatus;
-
-		await updateLeadFromAgent({
-			appointmentCreated,
-			currentStatus: baseStatus,
-			existingLead: {
-				birthDate: lead.birthDate,
-				consortiumType: lead.consortiumType,
-				currentSituation: lead.currentSituation,
-				interestedInConsultant: lead.interestedInConsultant,
-				objective: lead.objective,
-				painPoint: lead.painPoint,
+	try {
+		// 7. Chama a IA: ela só escreve o texto; etapa e pergunta são do backend.
+		const response = await callModelForTurn({
+			businessProfile,
+			currentMessages: agentCurrentMessages,
+			conversationContext: {
+				doNotAsk: turnStage.doNotAsk,
+				isFirstContact,
+				pendingOffer,
+				question: turnStage.question,
+				stage: turnStage.stage,
 			},
-			leadId,
-			leadUpdate: {
-				...reconciledUpdate,
-				birthDate:
-					reconciledUpdate.birthDate === undefined ||
-					reconciledUpdate.birthDate === null
-						? reconciledUpdate.birthDate
-						: new Date(reconciledUpdate.birthDate),
-				interestedInConsultant: interestedInConsultantUpdate,
-				status: computedStatus,
-			},
-			persistLead: async ({ leadId: targetLeadId, values }) =>
-				persistLeadUpdate({
-					leadId: targetLeadId,
-					tx,
-					values,
-				}),
-			onPersistedStatus: (status) => {
-				updatedLeadStatus = status;
-			},
+			history: agentHistory,
+			lead: agentLead,
 		});
 
-		if (reconciledUpdate.name) {
-			await tx
-				.update(leads)
-				.set({ name: reconciledUpdate.name })
-				.where(eq(leads.id, leadId));
+		async function callModelForTurn(
+			params: Parameters<typeof generateMarianaReplyFn>[0]
+		) {
+			try {
+				turnResponse = await generateMarianaReplyFn(params);
+
+				return turnResponse;
+			} catch (error) {
+				const carrier = error as Error & TurnRewritesCarrier;
+
+				// L2/L4 lançam por projeto. O comportamento não muda: o turno só
+				// passa a ser visível, e com o id da camada que lançou (P-1).
+				if (carrier.turnGuardrailLayer) {
+					traceEmitted = true;
+					emitTurnTrace({
+						...traceBase,
+						actionBlockedReason: null,
+						executedAction: "none",
+						guardrailLayer: carrier.turnGuardrailLayer,
+						outcome: "guardrail_throw",
+						postTurnStage: turnStage.stage,
+						questionKey: turnStage.questionKey,
+						rawReplyText: null,
+						requestedNextAction: "unknown",
+						rewrites: carrier.turnRewrites ?? null,
+						sentReplyText: null,
+						turnId,
+					});
+				}
+
+				throw error;
+			}
 		}
 
-		const nextActionResult = await executeNextAction({
-			acceptedPendingOffer: acceptedOffer || reasonAnswered,
-			conversationId: activeConversation.id,
-			currentStatus: updatedLeadStatus,
+		// Extração validada pelo backend; status e interesse no consultor são
+		// decididos aqui, nunca pelo modelo.
+		const reconciledUpdate = reconcileLeadUpdate({
 			currentMessages,
-			leadId,
-			nextAction: response.result.nextAction,
-			persistConversationStatus: async ({
-				conversationId: targetConversationId,
-				status,
-				updatedAt,
-			}) => {
-				const [updatedConversation] = await tx
-					.update(conversations)
-					.set({
-						status,
-						updatedAt,
-					})
-					.where(eq(conversations.id, targetConversationId))
-					.returning();
-
-				if (!updatedConversation) {
-					throw new Error("Conversation not found");
-				}
-
-				return updatedConversation;
-			},
+			lastAskedQuestion,
+			lead: stageLead,
+			leadUpdate: response.result.leadUpdate,
 		});
-
-		// A pergunta do turno é recalculada com o que acabou de ser extraído.
-		const postTurnStage = computeConversationStage({
-			assistantHistory,
-			hasActiveSchedulingSession,
-			lead: {
-				...stageLead,
-				currentSituation:
-					reconciledUpdate.currentSituation ?? lead.currentSituation,
-				interestedInConsultant:
-					interestedInConsultantUpdate ?? lead.interestedInConsultant,
-				name: reconciledUpdate.name ?? lead.name,
-				objective: mergedObjective,
-				painPoint: reconciledUpdate.painPoint ?? lead.painPoint,
-				status: updatedLeadStatus,
-			},
+		const mergedObjective = reconciledUpdate.objective ?? lead.objective;
+		const acceptedOffer = acceptsPendingOffer({
+			currentMessages,
+			pendingOffer,
 		});
-		const stageReplyInput = {
-			apologize: isAlreadySaidComplaint(currentMessages),
-			isFirstContact,
-			previousAssistantMessage,
-			question: postTurnStage.question,
-		};
-		const composedReply =
-			nextActionResult.action === "request_consultant"
-				? COMMERCIAL_HANDOFF
-				: composeStageReply({
-						...stageReplyInput,
-						modelReply: response.result.reply,
-					});
-		const fallbackReply = composeStageReply({
-			...stageReplyInput,
-			modelReply: "",
-		});
+		const reasonAnswered =
+			pendingOffer === "consultant_reason" &&
+			typeof mergedObjective === "string" &&
+			mergedObjective.trim().length > 0;
+		const wantsConsultant =
+			acceptedOffer ||
+			reasonAnswered ||
+			hasCurrentSchedulingIntent(currentMessages);
+		const interestedInConsultantUpdate = wantsConsultant ? true : undefined;
+		const baseStatus = (
+			lead.status === "new" ? "qualifying" : lead.status
+		) as LeadStatus;
+		const computedStatus: LeadStatus =
+			baseStatus === "qualifying" &&
+			isLeadQualified(
+				mergeQualificationInput(qualificationInput, {
+					...reconciledUpdate,
+					interestedInConsultant: interestedInConsultantUpdate,
+				})
+			)
+				? "qualified"
+				: baseStatus;
 
-		const preparedResponse = await persistAuthorizedAssistantReply({
-			actionResult: nextActionResult,
-			fallbackReply,
-			persistAssistantMessage: async (content) => {
-				const [assistantMessage] = await tx
-					.insert(messages)
-					.values({
-						content,
-						conversationId: activeConversation.id,
-						role: "assistant",
-					})
-					.returning();
+		// 8. Valida regra de negócio antes de persistir qualquer mudança de status
+		const [existingAppointment] = await db
+			.select({ id: appointments.id })
+			.from(appointments)
+			.where(
+				and(
+					eq(appointments.leadId, leadId),
+					inArray(appointments.status, CONFIRMED_APPOINTMENT_STATUSES)
+				)
+			)
+			.limit(1);
 
-				if (!assistantMessage) {
-					throw new Error("Assistant message not found");
-				}
+		const appointmentCreated = Boolean(existingAppointment);
 
-				return assistantMessage;
-			},
-			requestedAction: response.result.nextAction,
-			reply: composedReply,
-		});
+		// 9. Salva resposta da Mariana e aplica a atualização do lead apenas se a transição for permitida
+		const actionResult = await db.transaction(async (tx) => {
+			let updatedLeadStatus: LeadStatus = baseStatus;
 
-		await tx
-			.update(conversations)
-			.set({
-				updatedAt: new Date(),
-			})
-			.where(eq(conversations.id, activeConversation.id));
-
-		return preparedResponse;
-	});
-
-	let finalReply = actionResult.reply;
-	let finalAssistantMessage = actionResult.assistantMessage;
-	let schedulingOffer: PersistSchedulingOfferResult | undefined;
-
-	await runSchedulingOfferIfAuthorized(
-		actionResult.shouldOfferSlots,
-		async () => {
-			const timeMin = new Date();
-			const timeMax = new Date(timeMin);
-
-			timeMax.setDate(timeMax.getDate() + 5);
-
-			const slots = await schedulingAvailabilityService.getAvailableSlots({
+			await updateLeadFromAgent({
+				appointmentCreated,
+				currentStatus: baseStatus,
+				existingLead: {
+					birthDate: lead.birthDate,
+					consortiumType: lead.consortiumType,
+					currentSituation: lead.currentSituation,
+					interestedInConsultant: lead.interestedInConsultant,
+					objective: lead.objective,
+					painPoint: lead.painPoint,
+				},
 				leadId,
-				timeMin,
-				timeMax,
+				leadUpdate: {
+					...reconciledUpdate,
+					birthDate:
+						reconciledUpdate.birthDate === undefined ||
+						reconciledUpdate.birthDate === null
+							? reconciledUpdate.birthDate
+							: new Date(reconciledUpdate.birthDate),
+					interestedInConsultant: interestedInConsultantUpdate,
+					status: computedStatus,
+				},
+				persistLead: async ({ leadId: targetLeadId, values }) =>
+					persistLeadUpdate({
+						leadId: targetLeadId,
+						tx,
+						values,
+					}),
+				onPersistedStatus: (status) => {
+					updatedLeadStatus = status;
+				},
 			});
 
-			const offeredSlots = slots.slice(0, 3);
-
-			finalReply = formatSchedulingOffer(offeredSlots);
-
-			if (!actionResult.assistantMessage) {
-				throw new Error("Assistant message not found");
+			if (reconciledUpdate.name) {
+				await tx
+					.update(leads)
+					.set({ name: reconciledUpdate.name })
+					.where(eq(leads.id, leadId));
 			}
 
-			if (offeredSlots.length > 0) {
-				schedulingOffer = await schedulingOfferService.persistOffer({
-					conversationId: activeConversation.id,
-					finalReply,
+			const nextActionResult = await executeNextAction({
+				acceptedPendingOffer: acceptedOffer || reasonAnswered,
+				conversationId: activeConversation.id,
+				currentStatus: updatedLeadStatus,
+				currentMessages,
+				leadId,
+				nextAction: response.result.nextAction,
+				persistConversationStatus: async ({
+					conversationId: targetConversationId,
+					status,
+					updatedAt,
+				}) => {
+					const [updatedConversation] = await tx
+						.update(conversations)
+						.set({
+							status,
+							updatedAt,
+						})
+						.where(eq(conversations.id, targetConversationId))
+						.returning();
+
+					if (!updatedConversation) {
+						throw new Error("Conversation not found");
+					}
+
+					return updatedConversation;
+				},
+			});
+
+			// A pergunta do turno é recalculada com o que acabou de ser extraído.
+			const postTurnStage = computeConversationStage({
+				assistantHistory,
+				hasActiveSchedulingSession,
+				lead: {
+					...stageLead,
+					currentSituation:
+						reconciledUpdate.currentSituation ?? lead.currentSituation,
+					interestedInConsultant:
+						interestedInConsultantUpdate ?? lead.interestedInConsultant,
+					name: reconciledUpdate.name ?? lead.name,
+					objective: mergedObjective,
+					painPoint: reconciledUpdate.painPoint ?? lead.painPoint,
+					status: updatedLeadStatus,
+				},
+			});
+			const stageReplyInput = {
+				apologize: isAlreadySaidComplaint(currentMessages),
+				isFirstContact,
+				previousAssistantMessage,
+				question: postTurnStage.question,
+			};
+			const composed =
+				nextActionResult.action === "request_consultant"
+					? {
+							reply: COMMERCIAL_HANDOFF,
+							// L5: o repasse comercial substitui o texto do modelo antes
+							// de qualquer composição de estágio.
+							rewrites:
+								COMMERCIAL_HANDOFF === response.result.reply
+									? []
+									: [
+											buildRewriteRecord(
+												"L5_request_consultant_override",
+												response.result.reply,
+												COMMERCIAL_HANDOFF
+											),
+										],
+						}
+					: composeStageReplyWithTrace({
+							...stageReplyInput,
+							modelReply: response.result.reply,
+						});
+			const composedReply = composed.reply;
+			const fallbackReply = composeStageReply({
+				...stageReplyInput,
+				modelReply: "",
+			});
+
+			const preparedResponse = await persistAuthorizedAssistantReply({
+				actionResult: nextActionResult,
+				fallbackReply,
+				persistAssistantMessage: async (content) => {
+					const [assistantMessage] = await tx
+						.insert(messages)
+						.values({
+							content,
+							conversationId: activeConversation.id,
+							role: "assistant",
+						})
+						.returning();
+
+					if (!assistantMessage) {
+						throw new Error("Assistant message not found");
+					}
+
+					return assistantMessage;
+				},
+				requestedAction: response.result.nextAction,
+				reply: composedReply,
+			});
+
+			await tx
+				.update(conversations)
+				.set({
+					updatedAt: new Date(),
+				})
+				.where(eq(conversations.id, activeConversation.id));
+
+			return {
+				...preparedResponse,
+				postTurnStage: postTurnStage.stage,
+				questionKey: postTurnStage.questionKey,
+				rewrites: [
+					...composed.rewrites,
+					...preparedResponse.rewrites,
+				] as RewriteRecord[],
+			};
+		});
+
+		let finalReply = actionResult.reply;
+		let finalAssistantMessage = actionResult.assistantMessage;
+		let schedulingOffer: PersistSchedulingOfferResult | undefined;
+		const turnRewrites: RewriteRecord[] = [...actionResult.rewrites];
+
+		await runSchedulingOfferIfAuthorized(
+			actionResult.shouldOfferSlots,
+			async () => {
+				const timeMin = new Date();
+				const timeMax = new Date(timeMin);
+
+				timeMax.setDate(timeMax.getDate() + 5);
+
+				const slots = await schedulingAvailabilityService.getAvailableSlots({
 					leadId,
-					messageId: actionResult.assistantMessage.id,
-					offeredSlots,
+					timeMin,
+					timeMax,
 				});
 
-				finalAssistantMessage = schedulingOffer.updatedAssistantMessage;
+				const offeredSlots = slots.slice(0, 3);
+				const replyBeforeOffer = finalReply;
 
-				if (schedulingOffer.slots.length > 0) {
-					// Uma única opção segue direto para a confirmação já persistida.
-					await schedulingOfferService.enqueueConsultantPreferenceQuestion({
-						conversationId: activeConversation.id,
-						schedulingSessionId: schedulingOffer.session.id,
-						eventId: schedulingOffer.session.id,
-					});
+				finalReply = formatSchedulingOffer(offeredSlots);
+
+				// L11: a oferta de horários é montada pelo backend e troca o texto.
+				if (finalReply !== replyBeforeOffer) {
+					turnRewrites.push(
+						buildRewriteRecord(
+							"L11_slot_offer_replaced",
+							replyBeforeOffer,
+							finalReply
+						)
+					);
 				}
-			} else {
-				const [updatedAssistantMessage] = await db
-					.update(messages)
-					.set({
-						content: finalReply,
-					})
-					.where(eq(messages.id, actionResult.assistantMessage.id))
-					.returning();
 
-				if (!updatedAssistantMessage) {
+				if (!actionResult.assistantMessage) {
 					throw new Error("Assistant message not found");
 				}
 
-				finalAssistantMessage = updatedAssistantMessage;
-			}
-		}
-	);
+				if (offeredSlots.length > 0) {
+					schedulingOffer = await schedulingOfferService.persistOffer({
+						conversationId: activeConversation.id,
+						finalReply,
+						leadId,
+						messageId: actionResult.assistantMessage.id,
+						offeredSlots,
+					});
 
-	return {
-		actionResult: actionResult.actionResult,
-		assistantMessage: finalAssistantMessage,
-		metadata: response.metadata,
-		result: {
-			...response.result,
-			reply: finalReply,
-		},
-		schedulingOffer,
-	};
+					finalAssistantMessage = schedulingOffer.updatedAssistantMessage;
+
+					if (schedulingOffer.slots.length > 0) {
+						// Uma única opção segue direto para a confirmação já persistida.
+						await schedulingOfferService.enqueueConsultantPreferenceQuestion({
+							conversationId: activeConversation.id,
+							schedulingSessionId: schedulingOffer.session.id,
+							eventId: schedulingOffer.session.id,
+						});
+					}
+				} else {
+					const [updatedAssistantMessage] = await db
+						.update(messages)
+						.set({
+							content: finalReply,
+						})
+						.where(eq(messages.id, actionResult.assistantMessage.id))
+						.returning();
+
+					if (!updatedAssistantMessage) {
+						throw new Error("Assistant message not found");
+					}
+
+					finalAssistantMessage = updatedAssistantMessage;
+				}
+			}
+		);
+
+		traceEmitted = true;
+		emitTurnTrace({
+			...traceBase,
+			actionBlockedReason: blockedReasonOf(actionResult.actionResult),
+			executedAction: actionResult.actionResult.action,
+			guardrailLayer: null,
+			metadata: response.metadata,
+			outcome: "replied",
+			postTurnStage: actionResult.postTurnStage,
+			questionKey: actionResult.questionKey,
+			rawReplyText: response.result.reply,
+			requestedNextAction:
+				response.metadata.requestedNextAction ?? response.result.nextAction,
+			// P-2: sem relato do produtor o rastro diz `null`, nunca `[]`.
+			rewrites: response.metadata.rewrites
+				? [...response.metadata.rewrites, ...turnRewrites]
+				: null,
+			sentReplyText: finalReply,
+			turnId,
+		});
+
+		return {
+			actionResult: actionResult.actionResult,
+			assistantMessage: finalAssistantMessage,
+			metadata: response.metadata,
+			result: {
+				...response.result,
+				reply: finalReply,
+			},
+			schedulingOffer,
+		};
+	} catch (error) {
+		// Relança sem tocar: a task falha exatamente como hoje. O que muda é
+		// que o turno deixa de ser invisível.
+		if (!traceEmitted) {
+			emitFailureTrace({
+				...traceBase,
+				error,
+				postTurnStage: turnStage.stage,
+				questionKey: turnStage.questionKey,
+				response: turnResponse,
+				turnId,
+			});
+		}
+
+		throw error;
+	}
 }

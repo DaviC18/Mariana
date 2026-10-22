@@ -132,3 +132,91 @@ test("duas mensagens no mesmo debounce geram uma única resposta", async (t) => 
 	);
 	assert.ok(replyPrompt, "the single reply must cover both messages");
 });
+
+const MARIANA_TURN_EVENT = '"event":"mariana_turn"';
+
+test("o rastro do turno usa o id da task âncora", async (t) => {
+	t.mock.method(
+		ai.models,
+		"generateContent",
+		async () =>
+			({
+				text: JSON.stringify({
+					businessAction: "ask_next_qualification_question",
+					evidenceUsed: [],
+					leadUpdate: { status: "qualifying" },
+					nextAction: "continue_qualification",
+					reply: "Boa noite! Vamos falar do seu consórcio.",
+				}),
+			}) as GenerateContentResponse
+	);
+
+	const suffix = `${Date.now()}${Math.floor(Math.random() * 1000)}`;
+	const [lead] = await db
+		.insert(leads)
+		.values({ name: `Lead Trace ${suffix}`, phone: `5522${suffix.slice(-9)}` })
+		.returning({ id: leads.id });
+	assert.ok(lead);
+	t.after(async () => {
+		await db.delete(leads).where(eq(leads.id, lead.id));
+	});
+
+	const [conversation] = await db
+		.insert(conversations)
+		.values({ lastCustomerMessageAt: new Date(), leadId: lead.id })
+		.returning({ id: conversations.id });
+	assert.ok(conversation);
+
+	const createdAt = new Date(Date.now() - 60_000);
+	const cutoffAt = new Date(createdAt.getTime() + 25_000);
+
+	const [inbound] = await db
+		.insert(messages)
+		.values({
+			content: "quero fazer um consórcio",
+			conversationId: conversation.id,
+			createdAt,
+			externalId: `wamid.trace_${suffix}`,
+			role: "user",
+		})
+		.returning({ id: messages.id });
+	assert.ok(inbound);
+
+	const [anchorTask] = await db
+		.insert(autonomousTasks)
+		.values({
+			availableAt: cutoffAt,
+			conversationId: conversation.id,
+			createdAt,
+			idempotencyKey: `inbound:trace_${suffix}`,
+			payload: { batchCutoffAt: cutoffAt.toISOString(), kind: "text" },
+			taskType: PROCESS_INBOUND_MESSAGE_TASK,
+			triggerMessageId: inbound.id,
+		})
+		.returning({ id: autonomousTasks.id });
+	assert.ok(anchorTask);
+
+	const lines: string[] = [];
+	const originalInfo = console.info;
+
+	console.info = (...args: unknown[]) => {
+		if (typeof args[0] === "string" && args[0].includes(MARIANA_TURN_EVENT)) {
+			lines.push(args[0]);
+			return;
+		}
+
+		originalInfo(...(args as []));
+	};
+
+	try {
+		await runAutonomousTasksUntilIdle({
+			conversationId: conversation.id,
+			handlers: createAutonomousTaskHandlers(),
+		});
+	} finally {
+		console.info = originalInfo;
+	}
+
+	assert.equal(lines.length, 1);
+	assert.equal(JSON.parse(lines[0]).turnId, anchorTask.id);
+});

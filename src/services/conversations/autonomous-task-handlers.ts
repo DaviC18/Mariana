@@ -3,7 +3,8 @@
 /** biome-ignore-all lint/style/useFilenamingConvention: <> */
 
 import { and, asc, eq, gt, gte, inArray, isNull, lte, or } from "drizzle-orm";
-
+import { resolveModelName } from "../../ai/agent";
+import { ModelUnavailableError } from "../../ai/model-errors";
 import { db } from "../../db/connections";
 import {
 	autonomousTasks,
@@ -37,6 +38,7 @@ import {
 	getInboundBatchCutoffAt,
 	selectInboundMessageBatch,
 } from "./inbound-message-batch";
+import { MODEL_FAILURE_NOTICE } from "./model-failure-notice";
 
 const schedulingChoiceService = new SchedulingChoiceService();
 const schedulingConfirmationService = new SchedulingConfirmationService();
@@ -101,6 +103,68 @@ function buttonPayload(payload: {
  * messages referenced by inbound tasks in that cohort are included; stale
  * history without a matching task is never folded into the current reply.
  */
+/**
+ * Passo 11: o modelo falhou, então o cliente recebe o aviso aprovado em vez de
+ * silêncio, e a task **conclui** — nada vai tentar de novo sozinho, o que é
+ * exatamente o que o texto promete.
+ *
+ * Invariantes preservadas: usa o `runKey` que já existe, sem inventar uma
+ * segunda chave de idempotência, então uma reexecução cai no dedup do outbox e
+ * nenhuma mensagem possivelmente aceita pela Meta volta para `pending`; e
+ * marca mensagens e evento como processados exatamente como o caminho de
+ * sucesso, então nenhum evento de entrada é processado duas vezes.
+ */
+async function sendModelFailureNotice({
+	conversationId,
+	error,
+	eventId,
+	leadId,
+	messageIds,
+	runKey,
+}: {
+	conversationId: string;
+	error: ModelUnavailableError;
+	eventId: string | undefined;
+	leadId: string;
+	messageIds: string[];
+	runKey: string;
+}) {
+	const [assistantMessage] = await db
+		.insert(messages)
+		.values({
+			content: MODEL_FAILURE_NOTICE,
+			conversationId,
+			role: "assistant",
+		})
+		.returning({ id: messages.id });
+
+	await enqueueOutboundMessage({
+		conversationId,
+		eventId,
+		idempotencyKey: runKey,
+		leadId,
+		messageId: assistantMessage?.id,
+		payload: { kind: "text", text: MODEL_FAILURE_NOTICE },
+	});
+
+	await markMessagesProcessed(messageIds);
+	await markEventProcessed(eventId);
+
+	console.error({
+		conversationId,
+		event: "mariana_model_failure",
+		kind: error.kind,
+		leadId,
+		model: resolveModelName(),
+	});
+
+	return {
+		assistantMessageId: assistantMessage?.id,
+		modelFailureNotice: true,
+		outboundQueued: true,
+	};
+}
+
 const handleProcessInboundMessage: AutonomousTaskHandler = async ({ task }) => {
 	const { conversationId, payload: taskPayload, triggerMessageId } = task;
 	const eventId = taskPayload?.eventId as string | undefined;
@@ -187,13 +251,34 @@ const handleProcessInboundMessage: AutonomousTaskHandler = async ({ task }) => {
 		lastMessage.createdAt
 	);
 
-	const marianaResult = await generateMarianaResponse({
-		currentMessages: unprocessed.map((message) => message.content),
-		leadId: conversation.leadId,
-		messageCutoff,
-		messageIds,
-		persistUserMessage: false,
-	});
+	let marianaResult: Awaited<ReturnType<typeof generateMarianaResponse>>;
+
+	try {
+		marianaResult = await generateMarianaResponse({
+			currentMessages: unprocessed.map((message) => message.content),
+			leadId: conversation.leadId,
+			messageCutoff,
+			messageIds,
+			persistUserMessage: false,
+			// A task âncora identifica o turno no rastro.
+			traceTurnId: task.id,
+		});
+	} catch (error) {
+		// Só falha de modelo. Guardrail e erro de banco continuam falhando a
+		// task como hoje: engolir tudo esconderia defeito de verdade.
+		if (!(error instanceof ModelUnavailableError)) {
+			throw error;
+		}
+
+		return await sendModelFailureNotice({
+			conversationId,
+			error,
+			eventId,
+			leadId: conversation.leadId,
+			messageIds,
+			runKey,
+		});
+	}
 
 	const assistantMessageId = marianaResult.assistantMessage?.id;
 

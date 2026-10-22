@@ -8,6 +8,7 @@
 
 import { CONSULTANT_OFFER_TEXT } from "../../ai/knowledge/commercial-policy";
 import type { MarianaResponse } from "../../ai/schemas/mariana-response-schema";
+import { buildRewriteRecord, type RewriteRecord } from "../../lib/turn-trace";
 import {
 	CONSULTANT_REASON_QUESTION,
 	CURRENT_SITUATION_QUESTION,
@@ -376,26 +377,86 @@ export function splitSentences(text: string): string[] {
 		.filter((sentence) => /[\p{L}\p{N}]/u.test(sentence));
 }
 
-// Monta a resposta final: frases do Gemini sem perguntas e sem cumprimento
-// repetido, no máximo 3 frases no total, e a pergunta do backend no fim.
-export function composeStageReply({
-	apologize,
-	isFirstContact,
-	modelReply,
-	previousAssistantMessage,
-	question,
-}: {
+export interface ComposeStageReplyInput {
 	apologize: boolean;
 	isFirstContact: boolean;
 	modelReply: string;
 	previousAssistantMessage: string | null | undefined;
 	question: string | null;
-}): string {
-	let statements = splitSentences(modelReply).filter(
-		(sentence) =>
-			!sentence.endsWith("?") &&
-			(isFirstContact || !GREETING_SENTENCE_PATTERN.test(normalize(sentence)))
+}
+
+const asText = (sentences: string[]) => sentences.join(" ").trim();
+
+/**
+ * Acumula os registros encadeados: o `before` de cada camada é o texto que
+ * saiu da anterior, e o da primeira é o `modelReply` cru — espaços duplos
+ * incluídos. Sem isso a normalização de `splitSentences` apareceria como
+ * caracteres perdidos sem registro (defeito B-1).
+ */
+class RewriteChain {
+	private current: string;
+	readonly records: RewriteRecord[] = [];
+
+	constructor(rawText: string) {
+		this.current = rawText;
+	}
+
+	record(
+		layer: RewriteRecord["layer"],
+		after: string[],
+		detail: RewriteRecord["detail"]
+	) {
+		const textAfter = asText(after);
+
+		this.records.push(
+			buildRewriteRecord(layer, this.current, textAfter, detail)
+		);
+		this.current = textAfter;
+	}
+}
+
+// Monta a resposta final: frases do Gemini sem perguntas e sem cumprimento
+// repetido, no máximo 3 frases no total, e a pergunta do backend no fim.
+// Registra uma entrada por camada que mudou o texto (L6–L9).
+export function composeStageReplyWithTrace({
+	apologize,
+	isFirstContact,
+	modelReply,
+	previousAssistantMessage,
+	question,
+}: ComposeStageReplyInput): { reply: string; rewrites: RewriteRecord[] } {
+	const chain = new RewriteChain(modelReply);
+	const sentences = splitSentences(modelReply);
+
+	// L6: as perguntas do modelo saem — a pergunta é do backend.
+	const withoutQuestions = sentences.filter(
+		(sentence) => !sentence.endsWith("?")
 	);
+	const questionsDropped = sentences.length - withoutQuestions.length;
+
+	if (questionsDropped > 0) {
+		chain.record("L6_dropped_questions", withoutQuestions, {
+			questionsDropped,
+		});
+	}
+
+	let statements = withoutQuestions;
+
+	// L7: fora do primeiro contato, o cumprimento repetido sai.
+	if (!isFirstContact) {
+		const withoutGreetings = statements.filter(
+			(sentence) => !GREETING_SENTENCE_PATTERN.test(normalize(sentence))
+		);
+		const greetingsDropped = statements.length - withoutGreetings.length;
+
+		if (greetingsDropped > 0) {
+			chain.record("L7_dropped_greeting", withoutGreetings, {
+				greetingsDropped,
+			});
+		}
+
+		statements = withoutGreetings;
+	}
 
 	if (
 		apologize &&
@@ -408,19 +469,37 @@ export function composeStageReply({
 		statements.length > 0 &&
 		statements.every((sentence) => APOLOGY_PATTERN.test(normalize(sentence)));
 
+	// L9: nada do modelo sobrou, o backend escreve a resposta inteira.
 	if (!question && (statements.length === 0 || onlyApology)) {
 		const [first, second] = NEUTRAL_FALLBACK_REPLIES;
-		statements = [
-			...statements,
-			previousAssistantMessage?.includes(first) ? second : first,
-		];
+		const usesSecond = previousAssistantMessage?.includes(first) ?? false;
+		const withFallback = [...statements, usesSecond ? second : first];
+
+		chain.record("L9_neutral_fallback", withFallback, {
+			// O rótulo, nunca o texto visível ao cliente.
+			fallbackText: usesSecond ? "neutral_2" : "neutral_1",
+		});
+
+		statements = withFallback;
 	}
 
 	const maxStatements = question ? MAX_SENTENCES - 1 : MAX_SENTENCES;
-	return [
-		...statements.slice(0, maxStatements),
-		...(question ? [question] : []),
-	]
-		.join(" ")
-		.trim();
+	const capped = statements.slice(0, maxStatements);
+
+	// L8: o que não cabe no limite de frases é cortado.
+	if (capped.length < statements.length) {
+		chain.record("L8_sentence_cap", capped, {
+			cap: maxStatements,
+			sentencesTruncated: statements.length - capped.length,
+		});
+	}
+
+	return {
+		reply: asText([...capped, ...(question ? [question] : [])]),
+		rewrites: chain.records,
+	};
+}
+
+export function composeStageReply(input: ComposeStageReplyInput): string {
+	return composeStageReplyWithTrace(input).reply;
 }

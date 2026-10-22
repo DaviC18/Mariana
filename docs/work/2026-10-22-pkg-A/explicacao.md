@@ -1,18 +1,42 @@
 # Pacote A — explicação para o Davi
 
-Tarefa: `2026-10-22-pkg-A`. Plano completo: `docs/work/2026-10-22-pkg-A/plan.md` (está como **DRAFT**, esperando a sua aprovação).
+Tarefa: `2026-10-22-pkg-A`. Plano completo: `docs/work/2026-10-22-pkg-A/plan.md`.
 
-## 0. Antes de tudo: a spec v1.1 desapareceu
+**Estado em 22/10/2026, depois da sua mensagem de aprovação com mudanças:** os itens 2 a 7 foram decididos por você e já estão escritos no plano. A sua condição do item 1 não se cumpriu — a spec v1.1 não está em `docs/specs/` — então eu parei e te mostrei esta seção 0 antes de qualquer código, como você pediu. Depois disso você decidiu começar o Lote A de qualquer forma, e o plano está agora **APPROVED by Davi**, com uma ressalva escrita no próprio plano: os critérios de `R-REL-07` e `S-17` continuam derivados da sua orientação, e a aceitação final contra a spec fica em aberto até você me dar a redação das duas regras.
 
-A sua orientação diz que a régua é `docs/specs/MARIANA_BEHAVIOR_SPEC.md` **v1.1**. Esse arquivo não existe. A auditoria leu a spec na **raiz do repositório** (`MARIANA_BEHAVIOR_SPEC.md`, versão 1.0, 9182 bytes, **sem versionamento no git** — está registrado no `audit-report.md:38` e na finding F-01). Hoje esse arquivo também não está mais na raiz, e como ele nunca foi commitado, **o git não consegue recuperá-lo**: não há blob, não há histórico, não há `git checkout` possível.
+### Itens 2 a 7 — decididos e aplicados
 
-As consequências práticas:
+| # | Sua decisão | Onde está no plano |
+|---|---|---|
+| 2 | Mensagem de falha aprovada **exatamente como escrita**, fixada em teste | item 3 do Design; passo 10 |
+| 3 | `GEMINI_THINKING_LEVEL` = `LOW` | tabela de ambiente; passo 1 |
+| 4 | `GEMINI_MAX_OUTPUT_TOKENS` = `1024` | tabela de ambiente; passo 1 |
+| 5 | Passo 16 entra, no desenho que você descreveu | Lote E, passo 16 (agora obrigatório) |
+| 6 | `TURN_TRACE_VERBOSE` fica para o Pacote A2 | Fora de escopo |
+| 7 | Sem banco de teste remoto; só Docker local | passo 14 |
 
-- As regras `R-REL-07` (rastro do turno) e `S-17` (cenário de falha do modelo) aparecem no repositório apenas como **siglas** dentro da tabela do roteiro. A redação delas está perdida.
-- Então, no plano, cada critério de aceite que deveria citar `R-REL-07` ou `S-17` está escrito a partir da **sua orientação** e marcado com a frase *"redação de R-REL-07/S-17 não disponível — critério derivado do brief, pendente de confirmação"*.
-- Eu **não** reconstruí a spec e **não** escrevi nenhum arquivo de spec. Isso é decisão sua, não minha.
+Os itens 3 e 4 confirmam os padrões que o plano já propunha, então nenhum passo mudou por causa deles. O pacote agora tem **16 passos obrigatórios e nenhum opcional**.
 
-**Primeira pergunta, e a mais importante:** você consegue colar ou restaurar o `MARIANA_BEHAVIOR_SPEC.md` v1.1 em `docs/specs/` e commitar? Isso não impede começar o Pacote A, mas impede dar o pacote como "aceito contra a spec" no fim.
+## 0. Item 1: a spec v1.1 não foi restaurada
+
+Você escreveu que a spec v1.1 está em `docs/specs/MARIANA_BEHAVIOR_SPEC.md` e pediu para eu ler `R-REL-05`, `R-REL-07` e `S-17` lá e trocar os marcadores de "pendente de confirmação" pelo texto real. Eu procurei de novo, em quatro lugares, e o arquivo não está lá:
+
+| Verificação | Resultado |
+|---|---|
+| `ls docs/specs/` | só `2026-10-17-scheduling-and-session-flow.md` e `ROADMAP-2026-10-22.md` |
+| busca por nome no repositório inteiro | nenhum arquivo com "BEHAVIOR" no nome |
+| lista de arquivos versionados e histórico do caminho | o caminho nunca existiu no controle de versão; não há blob para recuperar |
+| busca fora do repositório | **uma cópia**: `~/Downloads/mariana-agent-team-1/docs/specs/MARIANA_BEHAVIOR_SPEC.md`, 9182 bytes, de 21/10 às 17:58 |
+
+Essa cópia é a **v1.0**, não a v1.1. O cabeçalho dela diz `Versão: 1.0 (2026-10-21)`, a tabela de confiabilidade (§6) para no `R-REL-06` e a tabela de cenários (§8) para no `S-15`. Ou seja:
+
+- **`R-REL-05` eu consegui ler**, e é esta: *"Nenhuma falha deixa o cliente sem resposta indefinidamente; erros relevantes aparecem nos logs."* Confere com o item 3 do pacote: a falha do modelo deixa de ser silêncio (o cliente recebe o aviso que você aprovou) e passa a aparecer no log. Esse critério nunca estava marcado como pendente, então nada mudou por causa dele.
+- **`R-REL-07` e `S-17` não existem em nenhuma cópia que eu consiga achar.** No repositório eles aparecem só como siglas na tabela do roteiro (`docs/specs/ROADMAP-2026-10-22.md:24`). Então os três marcadores (passos 4, 7 e 11) **ficaram como estavam**.
+- Eu **não** reconstruí a spec, **não** escrevi nenhum arquivo de spec e **não** copiei a v1.0 do `~/Downloads` para `docs/specs/`. Copiar seria arquivar uma v1.0 como se fosse a v1.1 restaurada — isso é decisão sua.
+
+**O que eu preciso de você, e são duas coisas separadas:** (a) a redação de `R-REL-07` e `S-17`, que não está em nenhum arquivo — tem que vir de você; (b) se eu posso colocar um arquivo de spec em `docs/specs/`, e qual — a v1.0 do `~/Downloads` ou uma v1.1 que você cole aqui.
+
+Isso **não impede** começar os lotes A a E. Impede dizer, no fim, que o pacote foi "aceito contra a spec".
 
 ## 1. O que eu entendi do problema
 
@@ -20,7 +44,7 @@ Hoje ninguém consegue saber se a Mariana raciocina mal ou se nós apagamos o ra
 
 ## 2. O que eu vou fazer, passo a passo
 
-São **15 passos obrigatórios e 1 opcional**, em 5 lotes de 1 a 3 passos, para o implementer pegar um lote por vez.
+São **16 passos obrigatórios** (o passo 16 deixou de ser opcional depois do seu item 5), em 5 lotes de 1 a 3 passos, para o implementer pegar um lote por vez.
 
 ### Lote A — tirar a configuração do modelo do código (passos 1 a 3)
 

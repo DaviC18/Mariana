@@ -120,9 +120,16 @@ function resolveAuthorizedAction({
 	return requestedAction;
 }
 
+/** Motivo do rebaixamento, quando a ação pedida foi bloqueada (decisão P-5). */
+export type ActionBlockedReason =
+	| "no_current_scheduling_intent"
+	| "lead_not_qualified";
+
 export type ExecuteNextActionResult =
 	| {
 			action: "continue_qualification";
+			/** Só observabilidade: não muda para qual ação se rebaixa. */
+			blockedReason?: ActionBlockedReason;
 			status: "executed";
 	  }
 	| {
@@ -250,6 +257,7 @@ export async function executeNextAction({
 
 			return {
 				action: "continue_qualification",
+				blockedReason: "no_current_scheduling_intent",
 				status: "executed",
 			};
 		}
@@ -265,6 +273,7 @@ export async function executeNextAction({
 
 			return {
 				action: "continue_qualification",
+				blockedReason: "lead_not_qualified",
 				status: "executed",
 			};
 		}
@@ -294,6 +303,7 @@ export async function executeNextAction({
 
 			return {
 				action: "continue_qualification",
+				blockedReason: "no_current_scheduling_intent",
 				status: "executed",
 			};
 		}
@@ -309,6 +319,7 @@ export async function executeNextAction({
 
 			return {
 				action: "continue_qualification",
+				blockedReason: "lead_not_qualified",
 				status: "executed",
 			};
 		}

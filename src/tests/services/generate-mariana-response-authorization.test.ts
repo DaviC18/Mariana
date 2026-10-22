@@ -227,3 +227,56 @@ test("pergunta de interesse no consultor não é tratada como compromisso de age
 		assert.equal(prepared.reply, reply);
 	}
 });
+
+test("persistAuthorizedAssistantReply registra L5 e L10", async () => {
+	const schedulingPromise = "Claro! Vou verificar os horários disponíveis.";
+
+	// L5: a ação resolvida é request_consultant, então o texto do modelo é
+	// substituído pelo repasse comercial do backend.
+	const override = await persistAuthorizedAssistantReply({
+		actionResult: { action: "request_consultant", status: "executed" },
+		fallbackReply: "fallback",
+		persistAssistantMessage: async (content) => content,
+		reply: schedulingPromise,
+		requestedAction: "schedule_meeting",
+	});
+
+	assert.equal(override.reply, COMMERCIAL_HANDOFF);
+	assert.deepEqual(
+		override.rewrites.map((record) => record.layer),
+		["L5_request_consultant_override"]
+	);
+	assert.equal(override.rewrites[0].lengthBefore, schedulingPromise.length);
+	assert.equal(override.rewrites[0].lengthAfter, COMMERCIAL_HANDOFF.length);
+
+	// L10: agendamento não autorizado, o texto cai para a pergunta do backend.
+	const blocked = await persistAuthorizedAssistantReply({
+		actionResult: { action: "continue_qualification", status: "executed" },
+		fallbackReply: "Qual é o seu objetivo?",
+		persistAssistantMessage: async (content) => content,
+		reply: schedulingPromise,
+		requestedAction: "schedule_meeting",
+	});
+
+	assert.equal(blocked.reply, "Qual é o seu objetivo?");
+	assert.deepEqual(
+		blocked.rewrites.map((record) => record.layer),
+		["L10_unauthorized_scheduling"]
+	);
+	assert.equal(blocked.rewrites[0].lengthBefore, schedulingPromise.length);
+	assert.equal(
+		blocked.rewrites[0].lengthAfter,
+		"Qual é o seu objetivo?".length
+	);
+
+	// Nada mudou, nada é registrado.
+	const untouched = await persistAuthorizedAssistantReply({
+		actionResult: { action: "continue_qualification", status: "executed" },
+		fallbackReply: "fallback",
+		persistAssistantMessage: async (content) => content,
+		reply: "O consórcio funciona por grupos.",
+		requestedAction: "continue_qualification",
+	});
+
+	assert.deepEqual(untouched.rewrites, []);
+});

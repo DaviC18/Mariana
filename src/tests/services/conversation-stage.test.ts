@@ -6,8 +6,10 @@ import {
 	COMMERCIAL_HANDOFF,
 	CONSULTANT_OFFER_TEXT,
 } from "../../ai/knowledge/commercial-policy";
+import { hashText } from "../../lib/turn-trace";
 import {
 	composeStageReply,
+	composeStageReplyWithTrace,
 	computeConversationStage,
 	findAskedQuestion,
 	inferConsortiumType,
@@ -371,4 +373,170 @@ test("compose sem conteúdo usa uma frase neutra que não repete a anterior", ()
 		}),
 		`Desculpe! ${second}`
 	);
+});
+
+const L6_MODEL_REPLY =
+	"Entendi, Davi! O consórcio é uma compra planejada. Qual é a sua situação atual?";
+
+test("composeStageReplyWithTrace registra as perguntas removidas", () => {
+	const { reply, rewrites } = composeStageReplyWithTrace({
+		apologize: false,
+		isFirstContact: false,
+		modelReply: L6_MODEL_REPLY,
+		previousAssistantMessage: null,
+		question: null,
+	});
+
+	assert.equal(reply, "Entendi, Davi! O consórcio é uma compra planejada.");
+
+	const dropped = rewrites.find(
+		(record) => record.layer === "L6_dropped_questions"
+	);
+
+	assert.ok(dropped, "a camada L6 precisa estar registrada");
+	assert.equal(dropped.detail?.questionsDropped, 1);
+	assert.equal(dropped.lengthBefore, L6_MODEL_REPLY.length);
+	assert.equal(dropped.lengthAfter, reply.length);
+	assert.equal(dropped.hashBefore, hashText(L6_MODEL_REPLY));
+	assert.equal(dropped.hashAfter, hashText(reply));
+});
+
+test("registra o corte de frases e o fallback neutro", () => {
+	const capped = composeStageReplyWithTrace({
+		apologize: false,
+		isFirstContact: true,
+		modelReply:
+			"Olá, Davi! Boa noite! Eu sou a Mariana. O consórcio é uma compra planejada. Você sabia?",
+		previousAssistantMessage: null,
+		question: REASON_QUESTION,
+	});
+
+	assert.equal(capped.reply, `Olá, Davi! Boa noite! ${REASON_QUESTION}`);
+
+	const cap = capped.rewrites.find(
+		(record) => record.layer === "L8_sentence_cap"
+	);
+
+	assert.ok(cap, "a camada L8 precisa estar registrada");
+	assert.equal(cap.detail?.cap, 2);
+	assert.equal(cap.detail?.sentencesTruncated, 2);
+
+	const fallback = composeStageReplyWithTrace({
+		apologize: false,
+		isFirstContact: false,
+		modelReply: "Qual é o seu objetivo?",
+		previousAssistantMessage: null,
+		question: null,
+	});
+
+	const [first] = NEUTRAL_FALLBACK_REPLIES;
+
+	assert.equal(fallback.reply, first);
+
+	const neutral = fallback.rewrites.find(
+		(record) => record.layer === "L9_neutral_fallback"
+	);
+
+	assert.ok(neutral, "a camada L9 precisa estar registrada");
+	assert.equal(neutral.detail?.fallbackText, "neutral_1");
+	assert.equal(neutral.lengthAfter, first.length);
+
+	const greeting = composeStageReplyWithTrace({
+		apologize: false,
+		isFirstContact: false,
+		modelReply: "Olá de novo, Davi! Boa noite! Entendi o seu objetivo.",
+		previousAssistantMessage: null,
+		question: null,
+	});
+
+	assert.equal(greeting.reply, "Entendi o seu objetivo.");
+	assert.equal(
+		greeting.rewrites.find((record) => record.layer === "L7_dropped_greeting")
+			?.detail?.greetingsDropped,
+		2
+	);
+});
+
+test("composeStageReply continua devolvendo a mesma string", () => {
+	// Guarda de regressão: o wrapper não pode mudar nenhum byte do texto.
+	const fixtures = [
+		{
+			apologize: false,
+			isFirstContact: false,
+			modelReply: L6_MODEL_REPLY,
+			previousAssistantMessage: null,
+			question: CONSULTANT_OFFER_TEXT,
+		},
+		{
+			apologize: true,
+			isFirstContact: false,
+			modelReply: "Entendi.",
+			previousAssistantMessage: null,
+			question: CONSULTANT_OFFER_TEXT,
+		},
+		{
+			apologize: false,
+			isFirstContact: true,
+			modelReply:
+				"Olá, Davi! Boa noite! Eu sou a Mariana. O consórcio é uma compra planejada. Você sabia?",
+			previousAssistantMessage: null,
+			question: REASON_QUESTION,
+		},
+	];
+
+	assert.deepEqual(
+		fixtures.map((fixture) => composeStageReply(fixture)),
+		[
+			`Entendi, Davi! O consórcio é uma compra planejada. ${CONSULTANT_OFFER_TEXT}`,
+			`Desculpe! Entendi. ${CONSULTANT_OFFER_TEXT}`,
+			`Olá, Davi! Boa noite! ${REASON_QUESTION}`,
+		]
+	);
+	assert.deepEqual(
+		fixtures.map((fixture) => composeStageReplyWithTrace(fixture).reply),
+		fixtures.map((fixture) => composeStageReply(fixture))
+	);
+});
+
+const DOUBLE_SPACED_REPLY =
+	"Oi, Davi!  O consórcio funciona por grupos.   Quer saber mais?";
+
+test("os registros do estágio encadeiam a partir da resposta crua", () => {
+	const { reply, rewrites } = composeStageReplyWithTrace({
+		apologize: false,
+		isFirstContact: true,
+		modelReply: DOUBLE_SPACED_REPLY,
+		previousAssistantMessage: null,
+		question: null,
+	});
+
+	assert.ok(rewrites.length > 0, "a pergunta removida precisa gerar registro");
+
+	// O primeiro `before` descreve exatamente o texto entregue ao compositor,
+	// espaços duplos incluídos — senão o passo 7 não consegue verificar a
+	// cadeia resposta crua → texto enviado.
+	assert.equal(rewrites[0].lengthBefore, DOUBLE_SPACED_REPLY.length);
+	assert.equal(rewrites[0].hashBefore, hashText(DOUBLE_SPACED_REPLY));
+
+	for (const [index, record] of rewrites.entries()) {
+		if (index === 0) {
+			continue;
+		}
+
+		assert.equal(
+			record.hashBefore,
+			rewrites[index - 1].hashAfter,
+			record.layer
+		);
+		assert.equal(
+			record.lengthBefore,
+			rewrites[index - 1].lengthAfter,
+			record.layer
+		);
+	}
+
+	const last = rewrites.at(-1);
+
+	assert.equal(last?.hashAfter, hashText(reply));
+	assert.equal(last?.lengthAfter, reply.length);
 });

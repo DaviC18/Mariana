@@ -195,6 +195,7 @@ test("offer_meeting é neutralizado para lead novo ou em qualificação", async 
 
 		assert.deepEqual(result, {
 			action: "continue_qualification",
+			blockedReason: "lead_not_qualified",
 			status: "executed",
 		});
 	}
@@ -211,6 +212,7 @@ test("schedule_meeting continua bloqueado para lead não qualificado", async () 
 
 	assert.deepEqual(result, {
 		action: "continue_qualification",
+		blockedReason: "lead_not_qualified",
 		status: "executed",
 	});
 });
@@ -227,6 +229,7 @@ test("greeting não autoriza oferta para lead qualificado ou em qualificação",
 
 		assert.deepEqual(result, {
 			action: "continue_qualification",
+			blockedReason: "no_current_scheduling_intent",
 			status: "executed",
 		});
 	}
@@ -267,6 +270,7 @@ test("pedido histórico de agendamento não autoriza greeting atual", async () =
 
 	assert.deepEqual(result, {
 		action: "continue_qualification",
+		blockedReason: "no_current_scheduling_intent",
 		status: "executed",
 	});
 });
@@ -287,6 +291,7 @@ test("solicitação negada e pergunta comercial não autorizam agendamento", asy
 
 		assert.deepEqual(result, {
 			action: "continue_qualification",
+			blockedReason: "no_current_scheduling_intent",
 			status: "executed",
 		});
 	}
@@ -316,6 +321,7 @@ test("afirmativa sem oferta pendente não autoriza offer_meeting", async () => {
 
 	assert.deepEqual(result, {
 		action: "continue_qualification",
+		blockedReason: "no_current_scheduling_intent",
 		status: "executed",
 	});
 });
@@ -345,6 +351,55 @@ test("aceite de oferta pendente com lead não qualificado continua a qualificaç
 
 	assert.deepEqual(result, {
 		action: "continue_qualification",
+		blockedReason: "lead_not_qualified",
 		status: "executed",
 	});
+});
+
+test("a ação rebaixada carrega o motivo do bloqueio", async () => {
+	// Sem intenção atual de agendamento: a ação cai para qualificação, e o
+	// motivo que o log já conhecia agora volta no resultado (decisão P-5).
+	const withoutIntent = await executeNextAction({
+		conversationId: "conv-blocked-intent",
+		currentMessages: ["Olá, Mariana"],
+		currentStatus: "qualified",
+		leadId: "lead-blocked-intent",
+		nextAction: "offer_meeting",
+	});
+
+	assert.equal(withoutIntent.action, "continue_qualification");
+	assert.equal(
+		"blockedReason" in withoutIntent ? withoutIntent.blockedReason : undefined,
+		"no_current_scheduling_intent"
+	);
+
+	// Com intenção, mas lead não qualificado.
+	const notQualified = await executeNextAction({
+		conversationId: "conv-blocked-qualified",
+		currentMessages: ["quero agendar uma reunião"],
+		currentStatus: "qualifying",
+		leadId: "lead-blocked-qualified",
+		nextAction: "offer_meeting",
+	});
+
+	assert.equal(notQualified.action, "continue_qualification");
+	assert.equal(
+		"blockedReason" in notQualified ? notQualified.blockedReason : undefined,
+		"lead_not_qualified"
+	);
+
+	// Nada bloqueado: nenhum motivo.
+	const executed = await executeNextAction({
+		conversationId: "conv-not-blocked",
+		currentMessages: ["quero agendar uma reunião"],
+		currentStatus: "qualified",
+		leadId: "lead-not-blocked",
+		nextAction: "offer_meeting",
+	});
+
+	assert.equal(executed.action, "offer_meeting");
+	assert.equal(
+		"blockedReason" in executed ? executed.blockedReason : undefined,
+		undefined
+	);
 });

@@ -3,8 +3,19 @@
 /** biome-ignore-all assist/source/useSortedInterfaceMembers: <> */
 /** biome-ignore-all lint/style/useDestructuring: <> */
 
-import type { GenerateContentResponse } from "@google/genai";
+import {
+	type GenerateContentConfig,
+	type GenerateContentResponse,
+	ThinkingLevel,
+} from "@google/genai";
 import { z } from "zod";
+import { env } from "../env";
+import {
+	buildRewriteRecord,
+	hashText,
+	type RewriteLayer,
+	type RewriteRecord,
+} from "../lib/turn-trace";
 import type { ConversationStage } from "../services/conversations/conversation-stage";
 import {
 	assertSafeMarianaReply,
@@ -27,15 +38,42 @@ import {
 	retrieveKnowledge,
 } from "./knowledge/retrieve";
 import { validateMarianaEvidence } from "./knowledge/validate-response";
+import { ModelUnavailableError } from "./model-errors";
 import { buildMarianaSystemPrompt } from "./prompt";
 import {
 	type MarianaResponse,
 	marianaResponseSchema,
 } from "./schemas/mariana-response-schema";
 
-const MODEL = "gemini-3.5-flash-lite";
 const CODE_FENCE_START = /^```(?:json)?\s*/i;
 const CODE_FENCE_END = /\s*```$/i;
+
+/** Nome do modelo: vem do ambiente, nunca de uma constante no código. */
+export function resolveModelName(): string {
+	return env.GEMINI_MODEL;
+}
+
+/**
+ * Configuração da chamada ao Gemini. Função pura: é o ponto de teste da
+ * amostragem (temperatura, limite de saída, nível de raciocínio) sem que
+ * nenhum teste chegue à API.
+ */
+export function buildModelRequestConfig({
+	systemInstruction,
+}: {
+	systemInstruction: string;
+}): GenerateContentConfig {
+	return {
+		maxOutputTokens: env.GEMINI_MAX_OUTPUT_TOKENS,
+		responseJsonSchema: z.toJSONSchema(marianaResponseSchema),
+		responseMimeType: "application/json",
+		systemInstruction,
+		temperature: env.GEMINI_TEMPERATURE,
+		// O enum do SDK tem exatamente os mesmos valores do env (MINIMAL, LOW,
+		// MEDIUM, HIGH), então o acesso por chave é seguro.
+		thinkingConfig: { thinkingLevel: ThinkingLevel[env.GEMINI_THINKING_LEVEL] },
+	};
+}
 
 export interface MarianaMessage {
 	content: string;
@@ -64,22 +102,69 @@ export interface MarianaConversationContext {
 	stage: ConversationStage;
 }
 
+/** O mesmo contrato de `ai.models.generateContent`: é o seam de teste. */
+export type GenerateContentFn = typeof ai.models.generateContent;
+
 export interface GenerateMarianaReplyParams {
 	additionalContext?: string;
 	businessProfile?: BusinessProfile;
 	conversationContext?: MarianaConversationContext;
 	currentMessages: MarianaMessage[];
+	/** Só os testes passam outro: o default é o cliente Gemini real. */
+	generateContentFn?: GenerateContentFn;
 	history: MarianaMessage[];
 	lead: MarianaLead;
 }
 
 export interface GenerateMarianaReplyResult {
 	metadata: {
+		/** Nível 1, 2 ou 3 da política comercial deste turno. */
+		commercialAccessLevel?: 1 | 2 | 3;
+		/** `MAX_TOKENS` aqui significa JSON truncado. */
+		finishReason?: string | null;
 		latencyMs: number;
 		model: string;
+		/**
+		 * O que a API devolveu, `null` quando ela omitiu. Diferente de `model`,
+		 * que cai no nome configurado: um campo "returned" não pode conter um
+		 * valor que ninguém devolveu.
+		 */
+		modelVersionReturned?: string | null;
+		/** Hash e comprimento da resposta do modelo antes de qualquer camada. */
+		rawReplyHash?: string;
+		rawReplyLength?: number;
+		/** O que o modelo pediu, antes do portão de ações decidir. */
+		requestedNextAction?: string;
+		/** Uma entrada por camada que mudou o texto (L0–L4 nesta função). */
+		rewrites?: RewriteRecord[];
 		usage: GenerateContentResponse["usageMetadata"] | null;
 	};
 	result: MarianaResponse;
+}
+
+/**
+ * Os registros parciais viajam no erro quando L2 ou L4 lançam, junto do id da
+ * camada que lançou (decisão P-1 do plano): `outcome: "guardrail_throw"`
+ * sozinho não separa um id de evidência inventado de uma identidade proibida.
+ */
+export interface TurnRewritesCarrier {
+	turnGuardrailLayer?: RewriteLayer;
+	turnRewrites?: RewriteRecord[];
+}
+
+function withRewrites(
+	error: unknown,
+	rewrites: RewriteRecord[],
+	guardrailLayer: RewriteLayer
+): unknown {
+	if (error instanceof Error) {
+		const carrier = error as Error & TurnRewritesCarrier;
+
+		carrier.turnGuardrailLayer = guardrailLayer;
+		carrier.turnRewrites = rewrites;
+	}
+
+	return error;
 }
 
 const STAGE_GUIDANCE: Record<ConversationStage, string> = {
@@ -150,13 +235,33 @@ Se o cliente perguntar "o que você me indica?" ou algo parecido, dê uma explic
 `;
 }
 
+/** Tira a cerca de código e lê o JSON. Falha de leitura é falha de modelo. */
+function parseModelJson(rawText: string): unknown {
+	const normalizedText = rawText.trim();
+	const jsonCandidate = normalizedText.startsWith("```")
+		? normalizedText.replace(CODE_FENCE_START, "").replace(CODE_FENCE_END, "")
+		: normalizedText;
+
+	try {
+		return JSON.parse(jsonCandidate);
+	} catch (error) {
+		throw new ModelUnavailableError("Gemini response was not valid JSON", {
+			cause: error,
+			kind: "invalid_json",
+		});
+	}
+}
+
 export async function generateMarianaReply({
 	businessProfile,
 	conversationContext,
 	currentMessages,
+	generateContentFn,
 	history,
 	lead,
 }: GenerateMarianaReplyParams): Promise<GenerateMarianaReplyResult> {
+	const callModel: GenerateContentFn =
+		generateContentFn ?? ((params) => ai.models.generateContent(params));
 	const startedAt = Date.now();
 	const profile = resolveBusinessProfile(businessProfile);
 	const allMessages = [...history, ...currentMessages];
@@ -198,8 +303,18 @@ export async function generateMarianaReply({
 	if (commercialAccess.level === 3) {
 		return {
 			metadata: {
+				commercialAccessLevel: 3,
+				finishReason: null,
 				latencyMs: Date.now() - startedAt,
-				model: MODEL,
+				model: resolveModelName(),
+				modelVersionReturned: null,
+				rawReplyHash: hashText(""),
+				rawReplyLength: 0,
+				requestedNextAction: "request_consultant",
+				// O modelo nunca foi chamado: o texto é 100% do backend.
+				rewrites: [
+					buildRewriteRecord("L0_level3_short_circuit", "", COMMERCIAL_HANDOFF),
+				],
 				usage: null,
 			},
 			result: marianaResponseSchema.parse({
@@ -237,54 +352,85 @@ Status: ${lead.status}
 ${conversationContext ? buildConversationContextSection(conversationContext) : ""}${accessInstruction}
 `;
 
-	const response = await ai.models.generateContent({
-		config: {
-			responseJsonSchema: z.toJSONSchema(marianaResponseSchema),
-			responseMimeType: "application/json",
-			systemInstruction: contextualSystemPrompt,
-		},
-		contents,
-		model: MODEL,
-	});
+	let response: GenerateContentResponse;
+	try {
+		response = await callModel({
+			config: buildModelRequestConfig({
+				systemInstruction: contextualSystemPrompt,
+			}),
+			contents,
+			model: resolveModelName(),
+		});
+	} catch (error) {
+		// A chamada não chegou a produzir resposta: falha de transporte.
+		throw new ModelUnavailableError(
+			"Gemini request failed before producing a response",
+			{ cause: error, kind: "transport" }
+		);
+	}
 
 	const rawText = response.text;
 	if (!rawText) {
-		throw new Error("Gemini returned an empty response");
+		throw new ModelUnavailableError("Gemini returned an empty response", {
+			kind: "empty_response",
+		});
 	}
 
-	let parsed: unknown;
-	const normalizedText = rawText.trim();
-	const jsonCandidate = normalizedText.startsWith("```")
-		? normalizedText.replace(CODE_FENCE_START, "").replace(CODE_FENCE_END, "")
-		: normalizedText;
-
-	try {
-		parsed = JSON.parse(jsonCandidate);
-	} catch (error) {
-		throw new Error("Gemini response was not valid JSON", { cause: error });
-	}
+	const parsed = parseModelJson(rawText);
 
 	const parsedResult = marianaResponseSchema.parse(parsed);
-	const sanitizedReply = sanitizeCommercialIdentity(
-		parsedResult.reply,
-		profile
-	);
-	const result = validateMarianaEvidence({
-		clientStatedText: currentBlockQuery,
-		commercialAccess,
-		query: latestUserMessage,
-		response: {
-			...parsedResult,
-			reply: sanitizedReply,
-		},
-		retrieval: knowledgeContext,
-	});
-	assertSafeMarianaReply(result.reply, profile);
+	const rawReply = parsedResult.reply;
+	const rewrites: RewriteRecord[] = [];
+
+	const sanitizedReply = sanitizeCommercialIdentity(rawReply, profile);
+	if (sanitizedReply !== rawReply) {
+		rewrites.push(
+			buildRewriteRecord("L1_identity_sanitizer", rawReply, sanitizedReply)
+		);
+	}
+
+	let result: MarianaResponse;
+	try {
+		result = validateMarianaEvidence({
+			clientStatedText: currentBlockQuery,
+			commercialAccess,
+			query: latestUserMessage,
+			response: {
+				...parsedResult,
+				reply: sanitizedReply,
+			},
+			retrieval: knowledgeContext,
+		});
+	} catch (error) {
+		// L2: a validação de evidência lança. Os registros parciais viajam no
+		// erro para que o turno ainda possa ser rastreado.
+		throw withRewrites(error, rewrites, "L2_evidence_invalid_id");
+	}
+
+	if (result.reply !== sanitizedReply) {
+		rewrites.push(
+			buildRewriteRecord("L3_evidence_handoff", sanitizedReply, result.reply)
+		);
+	}
+
+	try {
+		assertSafeMarianaReply(result.reply, profile);
+	} catch (error) {
+		// L4: a asserção de segurança lança.
+		throw withRewrites(error, rewrites, "L4_safety_assertion");
+	}
 
 	return {
 		metadata: {
+			commercialAccessLevel: commercialAccess.level,
+			finishReason: response.candidates?.[0]?.finishReason ?? null,
 			latencyMs: Date.now() - startedAt,
-			model: response.modelVersion ?? MODEL,
+			model: response.modelVersion ?? resolveModelName(),
+			modelVersionReturned: response.modelVersion ?? null,
+			rawReplyHash: hashText(rawReply),
+			rawReplyLength: rawReply.length,
+			requestedNextAction: parsedResult.nextAction,
+			rewrites,
 			usage: response.usageMetadata ?? null,
 		},
 		result,

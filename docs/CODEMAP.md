@@ -17,7 +17,7 @@ Button replies: `webhook-whatsapp.ts` → task `process_button_reply` / `process
 | Need | File(s) |
 |---|---|
 | System prompt (pt-BR rules) | `src/ai/prompt.ts` (389 lines) |
-| Gemini call, model name, stage guidance, reply post-processing | `src/ai/agent.ts` (`MODEL`, `STAGE_GUIDANCE`, `generateMarianaReply`) |
+| Gemini call, model name, stage guidance, reply post-processing | `src/ai/agent.ts` (`resolveModelName`, `buildModelRequestConfig`, `STAGE_GUIDANCE`, `generateMarianaReply`) |
 | Gemini client / retries | `src/ai/client.ts` |
 | Structured response schema | `src/ai/schemas/mariana-response-schema.ts` |
 | Knowledge base + retrieval | `src/ai/knowledge/{consorcio,products,ademicon,index}.ts`, `retrieve.ts` |
@@ -44,6 +44,8 @@ Button replies: `webhook-whatsapp.ts` → task `process_button_reply` / `process
 | 24h window / opt-out | `services/conversations/whatsapp-compliance.ts` |
 | Env vars | `src/env.ts` |
 | Logger redaction | `src/lib/logger.ts` |
+| Turn trace (one JSON line per turn, rewrite layers L0–L11) | `src/lib/turn-trace.ts` (`hashText`, `isPureBackendText`, `logTurnTrace`) |
+| Model failure (wrap, notice text, honest reply) | `src/ai/model-errors.ts` (`ModelUnavailableError`), `src/services/conversations/model-failure-notice.ts` (`MODEL_FAILURE_NOTICE`) |
 | DB schema (Drizzle) | `src/db/schema/*.ts` (one file per table); `relations.ts` |
 | Migrations (FROZEN) | `drizzle/` |
 
