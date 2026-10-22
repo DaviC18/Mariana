@@ -48,3 +48,35 @@ End every task with:
 2. Files changed, and why.
 3. Tests run (with results) and tests not run (with reason).
 4. Remaining risks.
+## Efficiency (tokens and time) — quality rules still win
+
+**Orient cheaply**
+- Read `docs/CODEMAP.md` first. Use it to go straight to the right files instead of exploring the tree.
+- Use `Grep`/`Glob` to locate code, then `Read` only the relevant range (`offset`/`limit`).
+- Read a whole file only when you will edit most of it.
+- Never re-read a file you already read in this session unless it changed. After `Edit`/`Write`, don't read it back to "check".
+- Don't open `node_modules/`, `dist/`, `drizzle/*/snapshot.json`, lockfiles or large fixtures unless the task is about them.
+
+**Run cheaply**
+- While iterating, run only the affected tests:
+  - unit: `npx tsx --import ./src/tests/support/unit-test-preload.ts --test --test-reporter=dot <file>`
+  - DB: `npx tsx --import ./src/tests/support/db-test-preload.ts --test --test-reporter=dot <file>`
+  - add `--test-name-pattern="<name>"` to run a single test.
+- Run the full suites (`test:unit`, `test:db`, `tsc`, `build`) once per finished step or batch, not after every edit.
+- Keep command output short:
+  - pipe long output through `| tail -n 40`;
+  - for test runs, show failures only (`--test-reporter=dot`, then the failing blocks);
+  - never paste full passing logs into replies or reports.
+- Run independent read-only commands in a single call when possible (`git status && git log --oneline -5`).
+
+**Write cheaply**
+- Reports, plans and progress notes: concise bullet points, file:line references instead of pasted code, abbreviated command output (≤ 15 lines per command).
+- Subagent final replies: ≤ 20 lines — a status, the paths of what was written, blockers and questions. The details go in the files under `docs/work/<task>/`.
+- When delegating, pass paths and step numbers, not file contents. The receiving agent reads what it needs.
+
+**Never trade these for speed**
+- The TDD red → green evidence.
+- The approval gates.
+- The safety rules above.
+- Running the full suites before declaring a step done.
+- Reading the code you are about to change.
