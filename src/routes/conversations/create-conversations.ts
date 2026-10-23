@@ -1,11 +1,12 @@
 /** biome-ignore-all lint/style/useFilenamingConvention: <> */
 
-import { and, eq } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import type { FastifyPluginCallbackZod } from "fastify-type-provider-zod";
 import { z } from "zod";
 
 import { db } from "../../db/connections";
-import { conversations, leads } from "../../db/schema";
+import { leads } from "../../db/schema";
+import { getOrCreateActiveConversation } from "../../services/conversations/active-conversation";
 
 export const createConversations: FastifyPluginCallbackZod = (app) => {
 	app.post(
@@ -43,49 +44,33 @@ export const createConversations: FastifyPluginCallbackZod = (app) => {
 					});
 				}
 
-				const [activeConversation] = await db
-					.select()
-					.from(conversations)
-					.where(
-						and(
-							eq(conversations.leadId, leadId),
-							eq(conversations.status, "active")
-						)
-					)
-					.limit(1);
-
-				if (activeConversation) {
-					const duration = Date.now() - startedAt;
-
-					request.log.info({
-						conversationId: activeConversation.id,
-						duration,
-						event: "conversation_already_active",
-						leadId: activeConversation.leadId,
-					});
-
-					return reply.code(200).send({
-						conversation: activeConversation,
-					});
-				}
-
-				const [conversation] = await db
-					.insert(conversations)
-					.values({
-						leadId,
-					})
-					.returning();
+				const { conversation, created } = await db.transaction((tx) =>
+					getOrCreateActiveConversation(tx, leadId)
+				);
 
 				const duration = Date.now() - startedAt;
+
+				if (created) {
+					request.log.info({
+						conversationId: conversation.id,
+						duration,
+						event: "conversation_created",
+						leadId: conversation.leadId,
+					});
+
+					return reply.code(201).send({
+						conversation,
+					});
+				}
 
 				request.log.info({
 					conversationId: conversation.id,
 					duration,
-					event: "conversation_created",
+					event: "conversation_already_active",
 					leadId: conversation.leadId,
 				});
 
-				return reply.code(201).send({
+				return reply.code(200).send({
 					conversation,
 				});
 			} catch (error) {

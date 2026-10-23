@@ -42,6 +42,9 @@ Button replies: `webhook-whatsapp.ts` → task `process_button_reply` / `process
 | Google Calendar API + OAuth route | `integrations/google-calendar/*`, `routes/google-calendar/auth-google.ts` |
 | WhatsApp send, error classification, timeout | `integrations/whatsapp/{whatsapp-client,whatsapp-errors,whatsapp-service}.ts` |
 | 24h window / opt-out | `services/conversations/whatsapp-compliance.ts` |
+| Session choice after 24h: gap rule, texts, `sessao:*` IDs | `services/conversations/session-choice-policy.ts` |
+| Pending session choice state (durable, no migration) | `services/conversations/session-choice-store.ts` (`autonomous_tasks` row type `session_choice_state`, `status: completed`) |
+| Single active conversation under lead lock | `services/conversations/active-conversation.ts` (`getOrCreateActiveConversation`; used by the webhook and `POST /conversations`) |
 | Env vars | `src/env.ts` |
 | Logger redaction | `src/lib/logger.ts` |
 | Turn trace (one JSON line per turn, rewrite layers L0–L11) | `src/lib/turn-trace.ts` (`hashText`, `isPureBackendText`, `logTurnTrace`) |

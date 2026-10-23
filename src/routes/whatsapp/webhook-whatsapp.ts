@@ -17,13 +17,23 @@ import {
 import { env } from "../../env";
 import { whatsAppService } from "../../integrations/whatsapp/whatsapp-service";
 import type { WhatsAppWebhookPayload } from "../../integrations/whatsapp/whatsapp-types";
+import { getOrCreateActiveConversation } from "../../services/conversations/active-conversation";
 import {
+	ASK_SESSION_CHOICE_TASK,
 	PROCESS_BUTTON_REPLY_TASK,
 	PROCESS_CONSULTANT_PREFERENCE_REPLY_TASK,
 	PROCESS_CONSULTANT_SELECTION_TASK,
 	PROCESS_INBOUND_MESSAGE_TASK,
+	PROCESS_SESSION_CHOICE_TASK,
+	REMIND_SESSION_CHOICE_TASK,
 	SEND_CONFIRMATION_REQUEST_TASK,
 } from "../../services/conversations/autonomous-task-handlers";
+import { isSessionInactivityGap } from "../../services/conversations/session-choice-policy";
+import {
+	markSupersededTasks,
+	openSessionChoice,
+	readPendingSessionChoice,
+} from "../../services/conversations/session-choice-store";
 import { isOptOutRequest } from "../../services/conversations/whatsapp-compliance";
 import { leadIngestionService } from "../../services/leads/lead-ingestion";
 
@@ -129,6 +139,8 @@ async function claimWhatsAppWebhookEvent({
 export async function enqueueTask({
 	availableAt,
 	conversationId,
+	createdAt,
+	executor = db,
 	idempotencyKey,
 	payload,
 	preserveExisting = false,
@@ -137,15 +149,18 @@ export async function enqueueTask({
 }: {
 	availableAt?: Date;
 	conversationId: string;
+	createdAt?: Date;
+	executor?: Pick<typeof db, "insert">;
 	idempotencyKey: string;
 	payload: Record<string, unknown>;
 	preserveExisting?: boolean;
 	taskType: string;
 	triggerMessageId?: string;
 }): Promise<boolean> {
-	const taskInsert = db.insert(autonomousTasks).values({
+	const taskInsert = executor.insert(autonomousTasks).values({
 		availableAt: availableAt ?? new Date(),
 		conversationId,
+		createdAt: createdAt ?? undefined,
 		idempotencyKey,
 		payload,
 		taskType,
@@ -180,12 +195,14 @@ async function extendOpenInboundBatch({
 	batchCutoffAt,
 	conversationId,
 	now,
+	executor = db,
 }: {
 	batchCutoffAt: Date;
 	conversationId: string;
 	now: Date;
+	executor?: typeof db;
 }) {
-	const pendingTasks = await db
+	const pendingTasks = await executor
 		.select({ id: autonomousTasks.id, payload: autonomousTasks.payload })
 		.from(autonomousTasks)
 		.where(
@@ -199,12 +216,12 @@ async function extendOpenInboundBatch({
 		);
 
 	for (const pendingTask of pendingTasks) {
-		await db
+		await executor
 			.update(autonomousTasks)
 			.set({
 				availableAt: batchCutoffAt,
 				payload: {
-					...pendingTask.payload,
+					...(pendingTask.payload as Record<string, unknown>),
 					batchCutoffAt: batchCutoffAt.toISOString(),
 				},
 				updatedAt: now,
@@ -349,129 +366,253 @@ export const webhookWhatsApp: FastifyPluginCallbackZod = (app, _opts, done) => {
 
 						const lead = ingestionResult.lead;
 
-						let [conversation] = await db
-							.select()
-							.from(conversations)
-							.where(
-								and(
-									eq(conversations.leadId, lead.id),
-									eq(conversations.status, "active")
-								)
-							)
-							.limit(1);
+						const receivedAt = new Date();
 
-						if (!conversation) {
-							[conversation] = await db
-								.insert(conversations)
-								.values({ leadId: lead.id })
-								.returning();
-						}
+						const { conversation } = await db.transaction((tx) =>
+							getOrCreateActiveConversation(tx, lead.id)
+						);
 
 						await db
 							.update(whatsappWebhookEvents)
-							.set({ conversationId: conversation.id, updatedAt: new Date() })
+							.set({ conversationId: conversation.id, updatedAt: receivedAt })
 							.where(eq(whatsappWebhookEvents.id, event.id));
 
+						const [currentConversation] = await db
+							.select({
+								id: conversations.id,
+								lastCustomerMessageAt: conversations.lastCustomerMessageAt,
+							})
+							.from(conversations)
+							.where(eq(conversations.id, conversation.id))
+							.limit(1);
+
+						const previousLastCustomerMessageAt =
+							currentConversation?.lastCustomerMessageAt ?? null;
+
 						if (isButtonReply && buttonId) {
-							/*
-							 * Uma resposta interativa também é uma ação de entrada
-							 * do cliente e renova a janela de atendimento.
-							 */
-							await db
-								.update(conversations)
-								.set({
-									lastCustomerMessageAt: new Date(),
-									updatedAt: new Date(),
-								})
-								.where(eq(conversations.id, conversation.id));
+							await db.transaction(async (tx) => {
+								const pending = await readPendingSessionChoice(
+									conversation.id,
+									tx
+								);
+								const gap = isSessionInactivityGap({
+									lastCustomerMessageAt: previousLastCustomerMessageAt,
+									now: receivedAt,
+								});
 
-							// Determinar o tipo de tarefa baseado no prefixo do buttonId
-							let taskType = PROCESS_BUTTON_REPLY_TASK;
-							if (buttonId.startsWith("pref:")) {
-								taskType = PROCESS_CONSULTANT_PREFERENCE_REPLY_TASK;
-							} else if (buttonId.startsWith("consultant:")) {
-								taskType = PROCESS_CONSULTANT_SELECTION_TASK;
-							} else if (
-								buttonId.startsWith("confirm:") ||
-								buttonId.startsWith("cancel:")
-							) {
-								taskType = PROCESS_BUTTON_REPLY_TASK;
-							} else if (SCHEDULING_SLOT_BUTTON_ID.test(buttonId)) {
-								taskType = SEND_CONFIRMATION_REQUEST_TASK;
-							}
+								await tx
+									.update(conversations)
+									.set({
+										lastCustomerMessageAt: receivedAt,
+										updatedAt: receivedAt,
+									})
+									.where(eq(conversations.id, conversation.id));
 
-							await enqueueTask({
-								conversationId: conversation.id,
-								idempotencyKey: `button-reply:${externalId}`,
-								payload: {
-									buttonId,
-									eventExternalId: externalId,
-									eventId: event.id,
-									kind: "button_reply",
-								},
-								taskType,
+								if (pending) {
+									if (buttonId.startsWith("sessao:")) {
+										await enqueueTask({
+											conversationId: conversation.id,
+											executor: tx,
+											idempotencyKey: `session-choice:${externalId}`,
+											payload: {
+												buttonId,
+												eventExternalId: externalId,
+												eventId: event.id,
+												kind: "button",
+											},
+											taskType: PROCESS_SESSION_CHOICE_TASK,
+										});
+										return;
+									}
+									await enqueueTask({
+										conversationId: conversation.id,
+										executor: tx,
+										idempotencyKey: `session-choice-invalid:${externalId}`,
+										payload: {
+											buttonId,
+											eventExternalId: externalId,
+											eventId: event.id,
+											kind: "invalid",
+										},
+										taskType: PROCESS_SESSION_CHOICE_TASK,
+									});
+									return;
+								}
+
+								if (gap && previousLastCustomerMessageAt) {
+									const opened = await openSessionChoice({
+										conversationId: conversation.id,
+										discardButtonId: buttonId,
+										executor: tx,
+										leadId: lead.id,
+										triggerExternalId: externalId,
+									});
+									if (opened) {
+										await markSupersededTasks({
+											conversationId: conversation.id,
+											executor: tx,
+										});
+										await enqueueTask({
+											conversationId: conversation.id,
+											executor: tx,
+											idempotencyKey: `session-choice-ask:${conversation.id}:${externalId}`,
+											payload: {
+												eventExternalId: externalId,
+												eventId: event.id,
+												discardButtonId: buttonId,
+											},
+											taskType: ASK_SESSION_CHOICE_TASK,
+										});
+									}
+									return;
+								}
+
+								// Determinar o tipo de tarefa baseado no prefixo do buttonId
+								let taskType = PROCESS_BUTTON_REPLY_TASK;
+								if (buttonId.startsWith("pref:")) {
+									taskType = PROCESS_CONSULTANT_PREFERENCE_REPLY_TASK;
+								} else if (buttonId.startsWith("consultant:")) {
+									taskType = PROCESS_CONSULTANT_SELECTION_TASK;
+								} else if (
+									buttonId.startsWith("confirm:") ||
+									buttonId.startsWith("cancel:")
+								) {
+									taskType = PROCESS_BUTTON_REPLY_TASK;
+								} else if (SCHEDULING_SLOT_BUTTON_ID.test(buttonId)) {
+									taskType = SEND_CONFIRMATION_REQUEST_TASK;
+								}
+
+								await enqueueTask({
+									conversationId: conversation.id,
+									executor: tx,
+									idempotencyKey: `button-reply:${externalId}`,
+									payload: {
+										buttonId,
+										eventExternalId: externalId,
+										eventId: event.id,
+										kind: "button_reply",
+									},
+									taskType,
+								});
 							});
 						} else if (content) {
-							const [insertedMessage] = await db
-								.insert(messages)
-								.values({
-									content,
-									conversationId: conversation.id,
-									externalId,
-									role: "user",
-								})
-								.onConflictDoNothing()
-								.returning();
-
-							const inboundMessage =
-								insertedMessage ??
-								(
-									await db
-										.select()
-										.from(messages)
-										.where(eq(messages.externalId, externalId))
-										.limit(1)
-								)[0];
-
-							await db
-								.update(conversations)
-								.set({
-									lastCustomerMessageAt: new Date(),
-									updatedAt: new Date(),
-									...(isOptOutRequest(content) ? { optOutAt: new Date() } : {}),
-								})
-								.where(eq(conversations.id, conversation.id));
-
-							if (!inboundMessage) {
-								throw new Error("Inbound message not found");
-							}
-
-							const now = new Date();
-							const batchCutoffAt = new Date(
-								now.getTime() + env.MESSAGE_DEBOUNCE_MS
-							);
-							const insertedTask = await enqueueTask({
-								availableAt: batchCutoffAt,
-								conversationId: conversation.id,
-								idempotencyKey: `inbound:${externalId}`,
-								payload: {
-									batchCutoffAt: batchCutoffAt.toISOString(),
-									eventExternalId: externalId,
-									eventId: event.id,
-									kind: "text",
-								},
-								preserveExisting: true,
-								taskType: PROCESS_INBOUND_MESSAGE_TASK,
-								triggerMessageId: inboundMessage.id,
-							});
-
-							if (insertedTask) {
-								await extendOpenInboundBatch({
-									batchCutoffAt,
-									conversationId: conversation.id,
-									now,
+							await db.transaction(async (tx) => {
+								const pending = await readPendingSessionChoice(
+									conversation.id,
+									tx
+								);
+								const gap = isSessionInactivityGap({
+									lastCustomerMessageAt: previousLastCustomerMessageAt,
+									now: receivedAt,
 								});
-							}
+
+								const [insertedMessage] = await tx
+									.insert(messages)
+									.values({
+										content,
+										conversationId: conversation.id,
+										externalId,
+										role: "user",
+									})
+									.onConflictDoNothing()
+									.returning();
+
+								const inboundMessage =
+									insertedMessage ??
+									(
+										await tx
+											.select()
+											.from(messages)
+											.where(eq(messages.externalId, externalId))
+											.limit(1)
+									)[0];
+
+								await tx
+									.update(conversations)
+									.set({
+										lastCustomerMessageAt: receivedAt,
+										updatedAt: receivedAt,
+										...(isOptOutRequest(content)
+											? { optOutAt: receivedAt }
+											: {}),
+									})
+									.where(eq(conversations.id, conversation.id));
+
+								if (!inboundMessage) {
+									throw new Error("Inbound message not found");
+								}
+
+								if (pending) {
+									await enqueueTask({
+										conversationId: conversation.id,
+										executor: tx,
+										idempotencyKey: `session-choice-remind:${externalId}`,
+										payload: {
+											eventExternalId: externalId,
+											eventId: event.id,
+											messageId: inboundMessage.id,
+										},
+										taskType: REMIND_SESSION_CHOICE_TASK,
+									});
+									return;
+								}
+
+								if (gap && previousLastCustomerMessageAt) {
+									const opened = await openSessionChoice({
+										conversationId: conversation.id,
+										executor: tx,
+										leadId: lead.id,
+										triggerExternalId: externalId,
+										triggerMessageId: inboundMessage.id,
+									});
+									if (opened) {
+										await markSupersededTasks({
+											conversationId: conversation.id,
+											executor: tx,
+										});
+										await enqueueTask({
+											conversationId: conversation.id,
+											executor: tx,
+											idempotencyKey: `session-choice-ask:${conversation.id}:${externalId}`,
+											payload: {
+												eventExternalId: externalId,
+												eventId: event.id,
+												triggerMessageId: inboundMessage.id,
+											},
+											taskType: ASK_SESSION_CHOICE_TASK,
+										});
+									}
+									return;
+								}
+
+								const now = receivedAt;
+								const batchCutoffAt = new Date(
+									now.getTime() + env.MESSAGE_DEBOUNCE_MS
+								);
+								const insertedTask = await enqueueTask({
+									availableAt: batchCutoffAt,
+									conversationId: conversation.id,
+									executor: tx,
+									idempotencyKey: `inbound:${externalId}`,
+									payload: {
+										batchCutoffAt: batchCutoffAt.toISOString(),
+										eventExternalId: externalId,
+										eventId: event.id,
+										kind: "text",
+									},
+									preserveExisting: true,
+									taskType: PROCESS_INBOUND_MESSAGE_TASK,
+									triggerMessageId: inboundMessage.id,
+								});
+
+								if (insertedTask) {
+									await extendOpenInboundBatch({
+										batchCutoffAt,
+										conversationId: conversation.id,
+										now,
+									});
+								}
+							});
 						}
 					} catch (err) {
 						request.log.error(
