@@ -37,6 +37,7 @@ import { schedulingSessions } from "../../db/schema/scheduling-sessions";
 import { schedulingSlots } from "../../db/schema/scheduling-slots";
 import { env } from "../../env";
 import { webhookWhatsApp } from "../../routes/whatsapp/webhook-whatsapp";
+import { executeNextAutonomousTask } from "../../services/conversations/autonomous-task-executor";
 import {
 	createAutonomousTaskHandlers,
 	PROCESS_BUTTON_REPLY_TASK,
@@ -45,7 +46,6 @@ import {
 	PROCESS_SESSION_CHOICE_TASK,
 	SEND_CONFIRMATION_REQUEST_TASK,
 } from "../../services/conversations/autonomous-task-handlers";
-import { executeNextAutonomousTask } from "../../services/conversations/autonomous-task-executor";
 import { SESSION_CHOICE_PENDING_INVALID_REPLY_TEXT } from "../../services/conversations/session-choice-policy";
 import { openSessionChoice } from "../../services/conversations/session-choice-store";
 
@@ -385,7 +385,11 @@ test("toque de outra família durante a pendência vira process_session_choice i
 					eq(autonomousTasks.taskType, PROCESS_SESSION_CHOICE_TASK)
 				)
 			);
-		await handler({ leaseToken: "t", renewLease: async () => true, task } as any);
+		await handler({
+			leaseToken: "t",
+			renewLease: async () => true,
+			task,
+		} as any);
 
 		assert.equal(await countAppointmentsForLead(lead.id), before);
 
@@ -394,7 +398,8 @@ test("toque de outra família durante a pendência vira process_session_choice i
 			.from(outboundMessages)
 			.where(eq(outboundMessages.conversationId, conversation.id));
 		const invalidReplies = outs.filter(
-			(o) => (o.payload as any).body === SESSION_CHOICE_PENDING_INVALID_REPLY_TEXT
+			(o) =>
+				(o.payload as any).body === SESSION_CHOICE_PENDING_INVALID_REPLY_TEXT
 		);
 		assert.equal(invalidReplies.length, 1);
 	} finally {
@@ -566,7 +571,11 @@ test("process_button_reply com confirm:<slot> durante a pendência não cria app
 			taskType: PROCESS_BUTTON_REPLY_TASK,
 		});
 
-		await handler({ leaseToken: "t", renewLease: async () => true, task } as any);
+		await handler({
+			leaseToken: "t",
+			renewLease: async () => true,
+			task,
+		} as any);
 
 		// Nenhum appointment criado (a barreira é a pendência, não a etapa).
 		assert.equal(await countAppointmentsForLead(leadId), 0);
@@ -579,7 +588,8 @@ test("process_button_reply com confirm:<slot> durante a pendência não cria app
 			.from(outboundMessages)
 			.where(eq(outboundMessages.conversationId, conversationId));
 		const pendingReplies = outs.filter(
-			(o) => (o.payload as any).body === SESSION_CHOICE_PENDING_INVALID_REPLY_TEXT
+			(o) =>
+				(o.payload as any).body === SESSION_CHOICE_PENDING_INVALID_REPLY_TEXT
 		);
 		assert.equal(pendingReplies.length, 1);
 		assert.equal((pendingReplies[0].payload as any).kind, "buttons");
@@ -621,7 +631,11 @@ test("process_consultant_preference_reply durante a pendência não muda a sess�
 			taskType: PROCESS_CONSULTANT_PREFERENCE_REPLY_TASK,
 		});
 
-		await handler({ leaseToken: "t", renewLease: async () => true, task } as any);
+		await handler({
+			leaseToken: "t",
+			renewLease: async () => true,
+			task,
+		} as any);
 
 		const [session] = await db
 			.select({ workflowStage: schedulingSessions.workflowStage })
@@ -664,7 +678,11 @@ test("process_consultant_selection durante a pendência não muda a sessão", as
 			taskType: PROCESS_CONSULTANT_SELECTION_TASK,
 		});
 
-		await handler({ leaseToken: "t", renewLease: async () => true, task } as any);
+		await handler({
+			leaseToken: "t",
+			renewLease: async () => true,
+			task,
+		} as any);
 
 		const [session] = await db
 			.select({ workflowStage: schedulingSessions.workflowStage })
@@ -703,7 +721,11 @@ test("send_confirmation_request durante a pendência não muda a sessão nem env
 			taskType: SEND_CONFIRMATION_REQUEST_TASK,
 		});
 
-		await handler({ leaseToken: "t", renewLease: async () => true, task } as any);
+		await handler({
+			leaseToken: "t",
+			renewLease: async () => true,
+			task,
+		} as any);
 
 		const [session] = await db
 			.select({ workflowStage: schedulingSessions.workflowStage })
@@ -723,7 +745,9 @@ test("send_confirmation_request durante a pendência não muda a sessão nem env
 			buttons?: Array<{ id: string; title: string }>;
 		};
 		assert.equal(payload.kind, "buttons");
-		assert.ok(payload.body?.includes("Antes de seguir, preciso da sua escolha"));
+		assert.ok(
+			payload.body?.includes("Antes de seguir, preciso da sua escolha")
+		);
 		assert.equal(payload.buttons?.length, 2);
 		const buttonIds = payload.buttons?.map((b) => b.id) ?? [];
 		assert.ok(buttonIds.includes("sessao:continuar"));
@@ -737,7 +761,11 @@ test("send_confirmation_request durante a pendência não muda a sessão nem env
 		assert.equal(appts.length, 0);
 
 		// Idempotência: re-executar não envia segundo lembrete
-		await handler({ leaseToken: "t", renewLease: async () => true, task } as any);
+		await handler({
+			leaseToken: "t",
+			renewLease: async () => true,
+			task,
+		} as any);
 		const outs2 = await db
 			.select({ payload: outboundMessages.payload })
 			.from(outboundMessages)
@@ -767,9 +795,8 @@ test("depois de resolver a pendência, o fluxo de agendamento volta a funcionar"
 		await openSessionChoice({ askedAt: new Date(), conversationId, leadId });
 
 		// Resolve via toque `sessao:continuar`.
-		const choiceHandler = createAutonomousTaskHandlers()[
-			PROCESS_SESSION_CHOICE_TASK
-		];
+		const choiceHandler =
+			createAutonomousTaskHandlers()[PROCESS_SESSION_CHOICE_TASK];
 		assert.ok(choiceHandler);
 		const choiceTask = await insertProcessingTask({
 			conversationId,
