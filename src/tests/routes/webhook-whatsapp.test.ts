@@ -6,7 +6,7 @@ import crypto from "node:crypto";
 import test from "node:test";
 import type { GenerateContentResponse } from "@google/genai";
 
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import fastify from "fastify";
 import {
 	serializerCompiler,
@@ -18,10 +18,12 @@ import { ai } from "../../ai/client";
 import { closeDatabase, db } from "../../db/connections";
 import {
 	appointments,
+	autonomousTasks,
 	consultants,
 	conversations,
 	leads,
 	messages,
+	outboundMessages,
 	schedulingSessions,
 	schedulingSlots,
 	whatsappWebhookEvents,
@@ -32,6 +34,11 @@ import { webhookWhatsApp } from "../../routes/whatsapp/webhook-whatsapp";
 import { SchedulingAvailabilityService } from "../../services/calendar/scheduling-availability";
 import { SchedulingChoiceService } from "../../services/calendar/scheduling-choice-service";
 import { SchedulingConfirmationOrchestrator } from "../../services/calendar/scheduling-confirmation-orchestrator";
+import {
+	ASK_SESSION_CHOICE_TASK,
+	PROCESS_INBOUND_MESSAGE_TASK,
+} from "../../services/conversations/autonomous-task-handlers";
+import { readPendingSessionChoice } from "../../services/conversations/session-choice-store";
 import { drainConversationWork } from "../../services/reliability/background-workers";
 
 function buildApp() {
@@ -322,6 +329,10 @@ test("POST /webhooks/whatsapp - fluxo completo: lead, conversation, inbound, deb
 	assert.equal(outboundMessage.conversationId, createdConversation.id);
 
 	assert.equal(outboundMessage.role, "assistant");
+	const outboundBeforeDuplicate = await db
+		.select({ id: outboundMessages.id })
+		.from(outboundMessages)
+		.where(eq(outboundMessages.conversationId, createdConversation.id));
 
 	const responseDuplicate = await app.inject({
 		headers: {
@@ -341,6 +352,12 @@ test("POST /webhooks/whatsapp - fluxo completo: lead, conversation, inbound, deb
 		.where(eq(messages.externalId, inboundWamid));
 
 	assert.equal(duplicateMessages.length, 1);
+
+	const outboundAfterDuplicate = await db
+		.select({ id: outboundMessages.id })
+		.from(outboundMessages)
+		.where(eq(outboundMessages.conversationId, createdConversation.id));
+	assert.deepEqual(outboundAfterDuplicate, outboundBeforeDuplicate);
 
 	const secondInboundWamid = `wamid.inbound2_${Date.now()}`;
 
@@ -1635,4 +1652,335 @@ test("POST /webhooks/whatsapp - oferta de agenda pergunta a preferência antes d
 		await db.delete(conversations).where(eq(conversations.id, conversation.id));
 		await db.delete(leads).where(eq(leads.id, lead.id));
 	}
+});
+
+test("mensagem 24h-1ms depois da última não pergunta e processa normalmente", async (t) => {
+	const app = buildApp();
+	t.after(() => app.close());
+
+	const mockedGeminiResponse = {
+		text: JSON.stringify({
+			businessAction: "ask_next_qualification_question",
+			evidenceUsed: [],
+			leadUpdate: { status: "qualifying" },
+			nextAction: "continue_qualification",
+			reply: "ok",
+		}),
+	} as GenerateContentResponse;
+	t.mock.method(ai.models, "generateContent", async () => mockedGeminiResponse);
+
+	const testPhone = `55119${Math.floor(10_000_000 + Math.random() * 90_000_000)}`;
+	const inboundWamid = `wamid.gap1_${Date.now()}_${Math.random().toString(36).slice(7)}`;
+	const outboundWamid = `wamid.gap1out_${Date.now()}_${Math.random().toString(36).slice(7)}`;
+
+	const originalSendTextMessage = WhatsAppService.prototype.sendTextMessage;
+	WhatsAppService.prototype.sendTextMessage = async () => ({
+		contacts: [{ input: testPhone, wa_id: testPhone }],
+		messages: [{ id: outboundWamid }],
+		messaging_product: "whatsapp",
+	});
+	t.after(() => {
+		WhatsAppService.prototype.sendTextMessage = originalSendTextMessage;
+	});
+
+	const textPayload = JSON.stringify({
+		entry: [
+			{
+				changes: [
+					{
+						field: "messages",
+						value: {
+							contacts: [
+								{ profile: { name: "Cliente Teste" }, wa_id: testPhone },
+							],
+							messages: [
+								{
+									from: testPhone,
+									id: inboundWamid,
+									text: { body: "oi" },
+									timestamp: String(Math.floor(Date.now() / 1000)),
+									type: "text",
+								},
+							],
+							messaging_product: "whatsapp",
+							metadata: {
+								display_phone_number: "5511999999999",
+								phone_number_id: "12345",
+							},
+						},
+					},
+				],
+				id: "entry_1",
+			},
+		],
+		object: "whatsapp_business_account",
+	});
+
+	const response = await app.inject({
+		headers: {
+			"content-type": "application/json",
+			"x-hub-signature-256": computeSignature(textPayload),
+		},
+		method: "POST",
+		payload: textPayload,
+		url: "/webhooks/whatsapp",
+	});
+	assert.equal(response.statusCode, 200);
+
+	const [lead] = await db
+		.select()
+		.from(leads)
+		.where(eq(leads.phone, testPhone))
+		.limit(1);
+	assert.ok(lead);
+	const [conversation] = await db
+		.select()
+		.from(conversations)
+		.where(eq(conversations.leadId, lead.id))
+		.limit(1);
+	assert.ok(conversation);
+	await db
+		.update(conversations)
+		.set({
+			lastCustomerMessageAt: new Date(Date.now() - 24 * 60 * 60 * 1000 + 1000),
+		})
+		.where(eq(conversations.id, conversation.id));
+
+	const inboundWamid2 = `wamid.gap1b_${Date.now()}_${Math.random().toString(36).slice(7)}`;
+	const textPayload2 = JSON.stringify({
+		entry: [
+			{
+				changes: [
+					{
+						field: "messages",
+						value: {
+							contacts: [
+								{ profile: { name: "Cliente Teste" }, wa_id: testPhone },
+							],
+							messages: [
+								{
+									from: testPhone,
+									id: inboundWamid2,
+									text: { body: "seguindo" },
+									timestamp: String(Math.floor(Date.now() / 1000)),
+									type: "text",
+								},
+							],
+							messaging_product: "whatsapp",
+							metadata: {
+								display_phone_number: "5511999999999",
+								phone_number_id: "12345",
+							},
+						},
+					},
+				],
+				id: "entry_1",
+			},
+		],
+		object: "whatsapp_business_account",
+	});
+	const response2 = await app.inject({
+		headers: {
+			"content-type": "application/json",
+			"x-hub-signature-256": computeSignature(textPayload2),
+		},
+		method: "POST",
+		payload: textPayload2,
+		url: "/webhooks/whatsapp",
+	});
+	assert.equal(response2.statusCode, 200);
+
+	await drainConversationWork(conversation.id);
+
+	const tasksInbound = await db
+		.select()
+		.from(autonomousTasks)
+		.where(
+			and(
+				eq(autonomousTasks.conversationId, conversation.id),
+				eq(autonomousTasks.taskType, PROCESS_INBOUND_MESSAGE_TASK)
+			)
+		);
+	assert.ok(tasksInbound.length >= 1);
+	const tasksAsk = await db
+		.select()
+		.from(autonomousTasks)
+		.where(
+			and(
+				eq(autonomousTasks.conversationId, conversation.id),
+				eq(autonomousTasks.taskType, ASK_SESSION_CHOICE_TASK)
+			)
+		);
+	assert.equal(tasksAsk.length, 0);
+
+	const pending = await readPendingSessionChoice(conversation.id);
+	assert.equal(pending, null);
+
+	await db
+		.delete(outboundMessages)
+		.where(eq(outboundMessages.conversationId, conversation.id));
+	await db
+		.delete(autonomousTasks)
+		.where(eq(autonomousTasks.conversationId, conversation.id));
+	await db.delete(messages).where(eq(messages.conversationId, conversation.id));
+	await db.delete(conversations).where(eq(conversations.id, conversation.id));
+	await db.delete(leads).where(eq(leads.id, lead.id));
+});
+
+test("mensagem com 24h exatas pergunta antes de processar", async (t) => {
+	const app = buildApp();
+	t.after(() => app.close());
+
+	const testPhone = `55119${Math.floor(10_000_000 + Math.random() * 90_000_000)}`;
+	const inboundWamid = `wamid.gap2_${Date.now()}_${Math.random().toString(36).slice(7)}`;
+
+	const textPayload = JSON.stringify({
+		entry: [
+			{
+				changes: [
+					{
+						field: "messages",
+						value: {
+							contacts: [
+								{ profile: { name: "Cliente Teste" }, wa_id: testPhone },
+							],
+							messages: [
+								{
+									from: testPhone,
+									id: inboundWamid,
+									text: { body: "oi" },
+									timestamp: String(Math.floor(Date.now() / 1000)),
+									type: "text",
+								},
+							],
+							messaging_product: "whatsapp",
+							metadata: {
+								display_phone_number: "5511999999999",
+								phone_number_id: "12345",
+							},
+						},
+					},
+				],
+				id: "entry_1",
+			},
+		],
+		object: "whatsapp_business_account",
+	});
+
+	const response = await app.inject({
+		headers: {
+			"content-type": "application/json",
+			"x-hub-signature-256": computeSignature(textPayload),
+		},
+		method: "POST",
+		payload: textPayload,
+		url: "/webhooks/whatsapp",
+	});
+	assert.equal(response.statusCode, 200);
+
+	const [lead] = await db
+		.select()
+		.from(leads)
+		.where(eq(leads.phone, testPhone))
+		.limit(1);
+	assert.ok(lead);
+	const [conversation] = await db
+		.select()
+		.from(conversations)
+		.where(eq(conversations.leadId, lead.id))
+		.limit(1);
+	assert.ok(conversation);
+	await db
+		.update(conversations)
+		.set({ lastCustomerMessageAt: new Date(Date.now() - 24 * 60 * 60 * 1000) })
+		.where(eq(conversations.id, conversation.id));
+
+	const inboundWamid2 = `wamid.gap2b_${Date.now()}_${Math.random().toString(36).slice(7)}`;
+	const textPayload2 = JSON.stringify({
+		entry: [
+			{
+				changes: [
+					{
+						field: "messages",
+						value: {
+							contacts: [
+								{ profile: { name: "Cliente Teste" }, wa_id: testPhone },
+							],
+							messages: [
+								{
+									from: testPhone,
+									id: inboundWamid2,
+									text: { body: "retorno" },
+									timestamp: String(Math.floor(Date.now() / 1000)),
+									type: "text",
+								},
+							],
+							messaging_product: "whatsapp",
+							metadata: {
+								display_phone_number: "5511999999999",
+								phone_number_id: "12345",
+							},
+						},
+					},
+				],
+				id: "entry_1",
+			},
+		],
+		object: "whatsapp_business_account",
+	});
+	const response2 = await app.inject({
+		headers: {
+			"content-type": "application/json",
+			"x-hub-signature-256": computeSignature(textPayload2),
+		},
+		method: "POST",
+		payload: textPayload2,
+		url: "/webhooks/whatsapp",
+	});
+	assert.equal(response2.statusCode, 200);
+
+	await drainConversationWork(conversation.id);
+
+	const pending = await readPendingSessionChoice(conversation.id);
+	assert.equal(pending?.state, "pending");
+	const tasksAsk = await db
+		.select()
+		.from(autonomousTasks)
+		.where(
+			and(
+				eq(autonomousTasks.conversationId, conversation.id),
+				eq(autonomousTasks.taskType, ASK_SESSION_CHOICE_TASK)
+			)
+		);
+	assert.equal(tasksAsk.length >= 1, true);
+	const tasksInbound = await db
+		.select()
+		.from(autonomousTasks)
+		.where(
+			and(
+				eq(autonomousTasks.conversationId, conversation.id),
+				eq(autonomousTasks.taskType, PROCESS_INBOUND_MESSAGE_TASK)
+			)
+		);
+	assert.equal(
+		tasksInbound.filter((taskRow: any) => taskRow.status === "pending").length,
+		0
+	);
+
+	const [convAfter] = await db
+		.select()
+		.from(conversations)
+		.where(eq(conversations.id, conversation.id))
+		.limit(1);
+	assert.ok(convAfter?.lastCustomerMessageAt);
+
+	await db
+		.delete(outboundMessages)
+		.where(eq(outboundMessages.conversationId, conversation.id));
+	await db
+		.delete(autonomousTasks)
+		.where(eq(autonomousTasks.conversationId, conversation.id));
+	await db.delete(messages).where(eq(messages.conversationId, conversation.id));
+	await db.delete(conversations).where(eq(conversations.id, conversation.id));
+	await db.delete(leads).where(eq(leads.id, lead.id));
 });

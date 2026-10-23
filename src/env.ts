@@ -26,6 +26,31 @@ export const envSchema = z.object({
 			message: "DATABASE_URL should start with postgresql://",
 		}),
 	GEMINI_API_KEY: z.string().min(1),
+	// A resposta é JSON (reply + leadUpdate + evidenceUsed) e os tokens de
+	// raciocínio são cobrados como saída: um limite apertado trunca o JSON.
+	GEMINI_MAX_OUTPUT_TOKENS: z.coerce
+		.number()
+		.int()
+		.min(128)
+		.max(8192)
+		.default(1024),
+	GEMINI_MODEL: z
+		.string()
+		.min(1)
+		.regex(
+			/^gemini-[0-9]+(?:\.[0-9]+)?-(?:flash|flash-lite|pro)(?:-[a-z0-9.-]+)?$/,
+			{
+				message:
+					"GEMINI_MODEL deve seguir o formato gemini-<versão>-<flash|flash-lite|pro>",
+			}
+		)
+		.default("gemini-3.5-flash-lite"),
+	GEMINI_TEMPERATURE: z.coerce.number().min(0).max(2).default(0.3),
+	// A partir do Gemini 3.5 o thinkingBudget é rejeitado pela API: a
+	// profundidade de raciocínio se controla por thinkingLevel.
+	GEMINI_THINKING_LEVEL: z
+		.enum(["MINIMAL", "LOW", "MEDIUM", "HIGH"])
+		.default("LOW"),
 	GOOGLE_ACCOUNT_EMAIL: z.string().email().min(1),
 	GOOGLE_ADS_WEBHOOK_KEY: z.string().min(1),
 	GOOGLE_CLIENT_ID: z.string().min(1),
@@ -51,6 +76,14 @@ export const envSchema = z.object({
 	WHATSAPP_APP_SECRET: z.string().min(1),
 	WHATSAPP_GRAPH_API_VERSION: z.string().min(1),
 	WHATSAPP_PHONE_NUMBER_ID: z.string().min(1),
+	// Bem abaixo do lease de 60s do outbox: o worker precisa ser liberado e
+	// marcar o envio como incerto antes que o lease expire.
+	WHATSAPP_SEND_TIMEOUT_MS: z.coerce
+		.number()
+		.int()
+		.min(1000)
+		.max(45_000)
+		.default(15_000),
 	WHATSAPP_VERIFY_TOKEN: z.string().min(1),
 	WHATSAPP_WABA_ID: z.string().min(1),
 });
@@ -65,6 +98,14 @@ export function buildEnvInput(source: NodeJS.ProcessEnv) {
 		),
 		DATABASE_URL: source.DATABASE_URL,
 		GEMINI_API_KEY: source.GEMINI_API_KEY,
+		// Valor inválido falha na validação em vez de cair no default.
+		GEMINI_MAX_OUTPUT_TOKENS: source.GEMINI_MAX_OUTPUT_TOKENS || undefined,
+		// Só o modelo e o nível são comparados como texto, então espaços neles
+		// devem falhar. Aqui o `trim` é obrigatório: `Number("   ")` é 0, que
+		// passa por `min(0)` e viraria uma temperatura 0 silenciosa.
+		GEMINI_MODEL: source.GEMINI_MODEL || undefined,
+		GEMINI_TEMPERATURE: source.GEMINI_TEMPERATURE?.trim() || undefined,
+		GEMINI_THINKING_LEVEL: source.GEMINI_THINKING_LEVEL || undefined,
 		GOOGLE_ACCOUNT_EMAIL: source.GOOGLE_ACCOUNT_EMAIL,
 		GOOGLE_ADS_WEBHOOK_KEY: source.GOOGLE_ADS_WEBHOOK_KEY,
 		GOOGLE_CLIENT_ID: source.GOOGLE_CLIENT_ID,
@@ -89,6 +130,8 @@ export function buildEnvInput(source: NodeJS.ProcessEnv) {
 		WHATSAPP_APP_SECRET: source.WHATSAPP_APP_SECRET,
 		WHATSAPP_GRAPH_API_VERSION: source.WHATSAPP_GRAPH_API_VERSION,
 		WHATSAPP_PHONE_NUMBER_ID: source.WHATSAPP_PHONE_NUMBER_ID,
+		// Valor inválido falha na validação em vez de cair no default.
+		WHATSAPP_SEND_TIMEOUT_MS: source.WHATSAPP_SEND_TIMEOUT_MS || undefined,
 		WHATSAPP_VERIFY_TOKEN: source.WHATSAPP_VERIFY_TOKEN,
 		WHATSAPP_WABA_ID: source.WHATSAPP_WABA_ID,
 	};

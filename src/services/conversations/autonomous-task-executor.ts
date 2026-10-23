@@ -1,14 +1,18 @@
 /** biome-ignore-all lint/style/noNonNullAssertion: <> */
 /** biome-ignore-all lint/performance/noAwaitInLoops: <> */
 import { randomUUID } from "node:crypto";
-import type { InferSelectModel } from "drizzle-orm";
 import { and, eq, sql } from "drizzle-orm";
 
 import { db } from "../../db/connections";
 import { autonomousTasks } from "../../db/schema";
 import { computeRetryBackoffMs } from "../../utils/retry-backoff";
+import {
+	type AutonomousTask,
+	mapAutonomousTaskRow,
+} from "./autonomous-task-row";
+import { readPendingSessionChoice } from "./session-choice-store";
 
-export type AutonomousTask = InferSelectModel<typeof autonomousTasks>;
+export type { AutonomousTask } from "./autonomous-task-row";
 
 /**
  * Contexto entregue a um handler. O `leaseToken` identifica a posse atual da
@@ -52,6 +56,11 @@ export const DEFAULT_TASK_LEASE_MS = 60_000;
  * serializa o processamento por conversa: enquanto há uma tarefa em
  * `processing` para a conversa, nenhuma outra é reclamada, preservando a
  * ordenação das respostas.
+ *
+ * Se houver uma escolha de sessão pendente para a conversa, tasks de
+ * agendamento não são reclamadas (apenas tasks `session_choice_*` podem
+ * prosseguir). Isso impede que uma task antiga de agendamento rode enquanto
+ * o cliente ainda não escolheu continuar/nova conversa.
  */
 async function claimNextTask({
 	leaseMs,
@@ -67,22 +76,48 @@ async function claimNextTask({
 		? sql`AND task."conversationId" = ${conversationId}`
 		: sql``;
 
+	// Se conversationId foi passado, verificar se há escolha pendente
+	// para decidir quais taskTypes bloquear.
+	let sessionChoicePending = false;
+	if (conversationId) {
+		const pending = await readPendingSessionChoice(conversationId);
+		sessionChoicePending = Boolean(pending);
+	}
+
+	// Task types de agendamento que devem ser bloqueados durante pendência
+	const schedulingTaskTypes = sql`('process_button_reply', 'send_consultant_preference_question', 'process_consultant_preference_reply', 'process_consultant_selection', 'send_confirmation_request')`;
+
 	const rows = (await db.execute(
 		sql`
     WITH candidate AS (
-      SELECT task."id"
+      SELECT task."id", task."taskType"
       FROM "autonomous_tasks" AS task
       WHERE task."status" = 'pending'
         AND task."availableAt" <= now()
         AND task."attempts" < task."maxAttempts"
         ${conversationFilter}
+        ${sessionChoicePending ? sql`AND task."taskType" NOT IN ${schedulingTaskTypes}` : sql``}
         AND NOT EXISTS (
           SELECT 1
           FROM "autonomous_tasks" AS other
           WHERE other."conversationId" = task."conversationId"
             AND other."status" = 'processing'
         )
-      ORDER BY task."availableAt", task."createdAt"
+				AND NOT EXISTS (
+					SELECT 1
+					FROM "autonomous_tasks" AS older
+					WHERE older."conversationId" = task."conversationId"
+						AND older."status" = 'pending'
+						AND older."attempts" < older."maxAttempts"
+						AND (
+							older."createdAt" < task."createdAt"
+							OR (
+								older."createdAt" = task."createdAt"
+								AND older."id" < task."id"
+							)
+						)
+				)
+			ORDER BY task."createdAt", task."id"
       FOR UPDATE SKIP LOCKED
       LIMIT 1
     )
@@ -99,9 +134,9 @@ async function claimNextTask({
     WHERE task."id" = candidate."id"
     RETURNING task.*
   `
-	)) as AutonomousTask[];
+	)) as Record<string, unknown>[];
 
-	return rows[0] as AutonomousTask | undefined;
+	return rows[0] ? mapAutonomousTaskRow(rows[0]) : undefined;
 }
 
 /** Renova o lease da tarefa desde que o token ainda seja o dono. */

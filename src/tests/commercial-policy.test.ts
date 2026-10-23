@@ -60,6 +60,11 @@ test("nível 3 bloqueia decisões e informações comerciais específicas", () =
 		"Consórcio dá lucro?",
 		"Qual estratégia eu devo usar?",
 		"A contemplação é garantida?",
+		"quanto fica a parcela?",
+		"qual a taxa?",
+		"quanto de lance?",
+		"qual o valor da parcela de um carro?",
+		"quanto eu pago por mês?",
 	]) {
 		assert.equal(resolve(message).level, 3, message);
 	}
@@ -109,4 +114,109 @@ test("explicação conceitual de taxa de administração pode permanecer", () =>
 	});
 
 	assert.equal(validated.reply, response.reply);
+});
+
+test("cliente informando a própria faixa de crédito não gera handoff de nível 3", () => {
+	const query = "a faixa de crédito é de R$ 100 mil";
+	const retrieval = retrieveKnowledge({ items: MARIANA_KNOWLEDGE, query });
+	const commercialAccess = resolveCommercialAccess({
+		message: query,
+		retrievedKnowledge: retrieval,
+	});
+	const response = marianaResponseSchema.parse({
+		...baseResponse,
+		reply:
+			"Entendi, uma carta de crédito de R$ 100 mil. E o que te motivou a buscar essa conquista agora?",
+	});
+
+	assert.notEqual(commercialAccess.level, 3);
+
+	const validated = validateMarianaEvidence({
+		commercialAccess,
+		query,
+		response,
+		retrieval,
+	});
+
+	assert.equal(validated.reply, response.reply);
+	assert.equal(validated.nextAction, "continue_qualification");
+});
+
+test("resposta a faixa informada que inventa outro valor continua bloqueada", () => {
+	const query = "a faixa de crédito é de R$ 100 mil";
+	const retrieval = retrieveKnowledge({ items: MARIANA_KNOWLEDGE, query });
+	const response = marianaResponseSchema.parse({
+		...baseResponse,
+		reply: "Com R$ 100 mil a parcela fica em torno de R$ 800.",
+	});
+	const validated = validateMarianaEvidence({
+		commercialAccess: resolveCommercialAccess({
+			message: query,
+			retrievedKnowledge: retrieval,
+		}),
+		query,
+		response,
+		retrieval,
+	});
+
+	assert.equal(validated.reply, CONSULTANT_FALLBACK);
+	assert.equal(validated.nextAction, "request_consultant");
+});
+
+test("pedido de parcela para um valor continua no nível 3", () => {
+	assert.equal(resolve("quanto fica a parcela de 100 mil?").level, 3);
+});
+
+test("números do cliente fora de contexto monetário não liberam valores na resposta", () => {
+	const query = "tenho 15 anos de empresa, 2 filhos e quero entender o crédito";
+	const retrieval = retrieveKnowledge({ items: MARIANA_KNOWLEDGE, query });
+	const commercialAccess = resolveCommercialAccess({
+		message: query,
+		retrievedKnowledge: retrieval,
+	});
+	const response = marianaResponseSchema.parse({
+		...baseResponse,
+		reply: "A taxa de administração é 15% e a parcela fica em 2 mil.",
+	});
+
+	assert.equal(commercialAccess.level, 2);
+
+	const validated = validateMarianaEvidence({
+		commercialAccess,
+		query,
+		response,
+		retrieval,
+	});
+
+	assert.equal(validated.reply, CONSULTANT_FALLBACK);
+});
+
+test("faixa informada em mensagem anterior do mesmo bloco também pode ser repetida", () => {
+	const query = "pode me explicar como funciona a carta de crédito?";
+	const retrieval = retrieveKnowledge({ items: MARIANA_KNOWLEDGE, query });
+	const response = marianaResponseSchema.parse({
+		...baseResponse,
+		reply:
+			"Claro! Com uma carta de crédito de R$ 100 mil, você usa o valor para comprar o bem.",
+	});
+	const validated = validateMarianaEvidence({
+		clientStatedText: `a faixa de crédito é de R$ 100 mil\n${query}`,
+		commercialAccess: { level: 2, reason: "teste" },
+		query,
+		response,
+		retrieval,
+	});
+
+	assert.equal(validated.reply, response.reply);
+});
+
+test("valor informado pelo cliente não é pedido de simulação", () => {
+	for (const message of [
+		"quero um crédito de R$ 100 mil",
+		"tenho uns 20 mil para dar de entrada",
+		"Quais bens posso adquirir?",
+		"Qual a idade mínima?",
+	]) {
+		assert.notEqual(resolve(message).level, 3, message);
+	}
 });

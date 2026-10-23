@@ -227,3 +227,155 @@ test("WhatsAppService valida assinaturas HMAC-SHA256 corretamente", () => {
 	assert.equal(service.verifySignature(rawBody, invalidHeader), false);
 	assert.equal(service.verifySignature(rawBody, undefined), false);
 });
+
+// fetch que nunca resolve e ignora o AbortSignal: o pior caso de um socket
+// pendurado. O cliente ainda precisa liberar o worker no timeout.
+function installHangingFetch(t: { after: (fn: () => void) => void }) {
+	const originalFetch = globalThis.fetch;
+	let calls = 0;
+	globalThis.fetch = (() => {
+		calls += 1;
+		return new Promise<Response>(() => undefined);
+	}) as typeof fetch;
+	t.after(() => {
+		globalThis.fetch = originalFetch;
+	});
+	return () => calls;
+}
+
+function failAfter(ms: number): Promise<never> {
+	return new Promise((_, reject) => {
+		setTimeout(
+			() => reject(new Error(`still pending after ${ms}ms`)),
+			ms
+		).unref();
+	});
+}
+
+test("WhatsAppClient aborta envio pendurado no timeout como incerto", async (t) => {
+	const fetchCalls = installHangingFetch(t);
+	const client = new WhatsAppClient({ sendTimeoutMs: 50 });
+
+	await assert.rejects(
+		Promise.race([
+			client.sendTextMessage("5511999999999", "Olá"),
+			failAfter(2000),
+		]),
+		(error: unknown) => {
+			assert.ok(error instanceof WhatsAppSendError, String(error));
+			assert.equal(error.kind, "uncertain");
+			assert.equal(error.retryable, false);
+			return true;
+		}
+	);
+	assert.equal(fetchCalls(), 1);
+});
+
+test("WhatsAppClient aborta Reply Buttons pendurado no timeout como incerto", async (t) => {
+	installHangingFetch(t);
+	const client = new WhatsAppClient({ sendTimeoutMs: 50 });
+
+	await assert.rejects(
+		Promise.race([
+			client.sendReplyButtonsMessage("5511999999999", "Escolha", [
+				{ id: "schedule:slot:1", title: "25/09 às 14:00" },
+			]),
+			failAfter(2000),
+		]),
+		(error: unknown) =>
+			error instanceof WhatsAppSendError && error.kind === "uncertain"
+	);
+});
+
+test("WhatsAppClient passa um AbortSignal para o fetch", async (t) => {
+	const originalFetch = globalThis.fetch;
+	let signal: AbortSignal | null | undefined;
+	globalThis.fetch = (async (_url: string | URL, options?: RequestInit) => {
+		signal = options?.signal;
+		return new Response(JSON.stringify({ messages: [{ id: "wamid.ok" }] }), {
+			status: 200,
+		});
+	}) as typeof fetch;
+	t.after(() => {
+		globalThis.fetch = originalFetch;
+	});
+
+	await new WhatsAppClient({ sendTimeoutMs: 1000 }).sendTextMessage(
+		"5511999999999",
+		"Olá"
+	);
+	assert.ok(signal instanceof AbortSignal);
+});
+
+test("WhatsAppClient não loga o telefone do destinatário em erro HTTP", async (t) => {
+	const phone = "5511987654321";
+	const originalFetch = globalThis.fetch;
+	globalThis.fetch = (async () =>
+		new Response(JSON.stringify({ error: { code: 131_026 } }), {
+			status: 400,
+			statusText: "Bad Request",
+		})) as typeof fetch;
+	const logged: string[] = [];
+	t.mock.method(console, "error", (...args: unknown[]) => {
+		logged.push(JSON.stringify(args));
+	});
+	t.after(() => {
+		globalThis.fetch = originalFetch;
+	});
+
+	await assert.rejects(
+		new WhatsAppClient().sendTextMessage(phone, "Olá"),
+		WhatsAppSendError
+	);
+	assert.ok(logged.length > 0, "expected the HTTP error to be logged");
+	assert.ok(!logged.join("").includes(phone), "recipient phone leaked to logs");
+});
+
+// Status de erro chega, mas o corpo nunca termina: a Meta já respondeu, então
+// o envio é classificado pelo status HTTP, não como incerto.
+function installStalledBodyFetch(
+	t: { after: (fn: () => void) => void },
+	status: number
+) {
+	const originalFetch = globalThis.fetch;
+	globalThis.fetch = (async () =>
+		new Response(
+			new ReadableStream({
+				start() {
+					// Nunca enfileira nem fecha: corpo travado.
+				},
+			}),
+			{
+				status,
+			}
+		)) as typeof fetch;
+	t.after(() => {
+		globalThis.fetch = originalFetch;
+	});
+}
+
+for (const { status, kind } of [
+	{ kind: "permanent", status: 400 },
+	{ kind: "retryable", status: 503 },
+]) {
+	test(`WhatsAppClient classifica HTTP ${status} pelo status mesmo com corpo travado`, async (t) => {
+		installStalledBodyFetch(t, status);
+		t.mock.method(console, "error", () => undefined);
+
+		await assert.rejects(
+			Promise.race([
+				new WhatsAppClient({ sendTimeoutMs: 1000 }).sendTextMessage(
+					"5511999999999",
+					"Olá"
+				),
+				failAfter(3000),
+			]),
+			(error: unknown) => {
+				assert.ok(error instanceof WhatsAppSendError, String(error));
+				assert.equal(error.kind, kind);
+				assert.equal(error.httpStatus, status);
+				return true;
+			}
+		);
+	});
+}

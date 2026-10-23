@@ -155,36 +155,26 @@ test("lead sem objective não pode ser qualified", () => {
 	);
 });
 
-test("lead sem consortiumType não pode ser qualified", () => {
+// Mínimo para oferecer horários: objetivo conhecido + interesse no consultor.
+// Tipo de consórcio, situação atual e motivação são opcionais.
+test("lead sem consortiumType, painPoint ou currentSituation pode ser qualified", () => {
+	for (const missing of ["consortiumType", "painPoint", "currentSituation"]) {
+		assert.equal(
+			isLeadQualified({
+				...validQualificationPayload,
+				[missing]: "",
+				interestedInConsultant: true,
+			}),
+			true,
+			missing
+		);
+	}
 	assert.equal(
 		isLeadQualified({
-			...validQualificationPayload,
-			consortiumType: "",
 			interestedInConsultant: true,
+			objective: "Comprar um carro",
 		}),
-		false
-	);
-});
-
-test("lead sem painPoint ou motivation não pode ser qualified", () => {
-	assert.equal(
-		isLeadQualified({
-			...validQualificationPayload,
-			interestedInConsultant: true,
-			painPoint: "",
-		}),
-		false
-	);
-});
-
-test("lead sem currentSituation não pode ser qualified", () => {
-	assert.equal(
-		isLeadQualified({
-			...validQualificationPayload,
-			currentSituation: "",
-			interestedInConsultant: true,
-		}),
-		false
+		true
 	);
 });
 

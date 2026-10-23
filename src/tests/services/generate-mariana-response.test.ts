@@ -7,6 +7,7 @@ import test from "node:test";
 import { eq } from "drizzle-orm";
 
 import type { GenerateMarianaReplyResult, MarianaLead } from "../../ai/agent";
+import { ModelUnavailableError } from "../../ai/model-errors";
 import { closeDatabase, db } from "../../db/connections";
 import {
 	consultants,
@@ -825,4 +826,317 @@ test("Etapa 10 — oferta estruturada com exatamente 1 slot", async () => {
 
 	await db.delete(conversations).where(eq(conversations.id, conversation.id));
 	await db.delete(leads).where(eq(leads.id, lead.id));
+});
+
+const MARIANA_TURN_EVENT = '"event":"mariana_turn"';
+const ELEVEN_DIGITS_IN_LINE = /\d{11}/;
+
+function captureTurnTraceLines() {
+	const lines: string[] = [];
+	const original = console.info;
+
+	console.info = (...args: unknown[]) => {
+		if (typeof args[0] === "string" && args[0].includes(MARIANA_TURN_EVENT)) {
+			lines.push(args[0]);
+			return;
+		}
+
+		original(...(args as []));
+	};
+
+	return {
+		lines,
+		restore: () => {
+			console.info = original;
+		},
+	};
+}
+
+async function seedTraceLead(suffix: string) {
+	const testPhone = `551198${Date.now().toString().slice(-7)}`;
+	const [lead] = await db
+		.insert(leads)
+		.values({ ...buildQualifiedLeadValues(testPhone), name: `Trace ${suffix}` })
+		.returning({ id: leads.id });
+
+	assert.ok(lead);
+
+	const [conversation] = await db
+		.insert(conversations)
+		.values({ leadId: lead.id })
+		.returning({ id: conversations.id });
+
+	assert.ok(conversation);
+
+	return { conversationId: conversation.id, leadId: lead.id, testPhone };
+}
+
+test("um turno emite exatamente uma linha mariana_turn com as camadas que alteraram o texto", async () => {
+	const { conversationId, leadId, testPhone } = await seedTraceLead("linha");
+	const clientText = "meu telefone é 5531999998888, como funciona?";
+	const capture = captureTurnTraceLines();
+	let result: Awaited<ReturnType<typeof generateMarianaResponse>>;
+
+	try {
+		result = await generateMarianaResponse({
+			currentMessages: [clientText],
+			generateMarianaReplyFn: async () => ({
+				metadata: {
+					commercialAccessLevel: 1 as const,
+					finishReason: "STOP",
+					latencyMs: 7,
+					model: "test-model",
+					rawReplyHash: "aaaaaaaaaaaa",
+					rawReplyLength: 10,
+					requestedNextAction: "continue_qualification",
+					rewrites: [],
+					usage: null,
+				},
+				result: {
+					leadUpdate: { status: "qualified" as const },
+					nextAction: "continue_qualification" as const,
+					reply:
+						"O consórcio é uma compra planejada. Os grupos são formados por pessoas. E você, qual seu prazo?",
+				},
+			}),
+			leadId,
+			traceTurnId: "3a7f1c92-4e6b-4d81-9a5c-2f8e1b7d6c04",
+		});
+	} finally {
+		capture.restore();
+	}
+
+	assert.equal(capture.lines.length, 1);
+
+	const [line] = capture.lines;
+	const trace = JSON.parse(line);
+
+	assert.equal(trace.event, "mariana_turn");
+	assert.equal(trace.turnId, "3a7f1c92-4e6b-4d81-9a5c-2f8e1b7d6c04");
+	assert.equal(trace.conversationId, conversationId);
+	assert.equal(trace.leadId, leadId);
+	assert.equal(trace.outcome, "replied");
+	assert.equal(trace.guardrailLayer, null);
+	assert.equal(trace.rewritesReported, true);
+	assert.ok(trace.requestedNextAction);
+	assert.ok(trace.executedAction);
+	assert.ok(
+		trace.rewrites.some(
+			(record: { layer: string }) => record.layer === "L6_dropped_questions"
+		),
+		line
+	);
+	assert.equal(trace.sentReplyLength, result.result.reply.length);
+
+	// Privacidade: nem o texto do cliente, nem o telefone, nem a resposta.
+	assert.equal(line.includes("telefone"), false);
+	assert.equal(line.includes(testPhone), false);
+	assert.equal(line.includes("5531999998888"), false);
+	assert.equal(line.includes("compra planejada"), false);
+	assert.equal(ELEVEN_DIGITS_IN_LINE.test(line), false);
+});
+
+test("uma exceção de guardrail ainda é registrada como guardrail_throw", async () => {
+	const { leadId } = await seedTraceLead("guardrail");
+	const capture = captureTurnTraceLines();
+
+	try {
+		await assert.rejects(
+			() =>
+				generateMarianaResponse({
+					currentMessages: ["como funciona o consórcio?"],
+					generateMarianaReplyFn: () => {
+						const error = new Error(
+							"Mariana reply violates the safety guardrails"
+						);
+
+						Object.assign(error, {
+							turnGuardrailLayer: "L4_safety_assertion",
+							turnRewrites: [],
+						});
+
+						return Promise.reject(error);
+					},
+					leadId,
+					traceTurnId: "c81b5e3a-9d27-4f6c-8b40-1e7a5d2c9f63",
+				}),
+			/safety guardrails/
+		);
+	} finally {
+		capture.restore();
+	}
+
+	assert.equal(capture.lines.length, 1);
+
+	const trace = JSON.parse(capture.lines[0]);
+
+	assert.equal(trace.outcome, "guardrail_throw");
+	assert.equal(trace.guardrailLayer, "L4_safety_assertion");
+	assert.equal(trace.turnId, "c81b5e3a-9d27-4f6c-8b40-1e7a5d2c9f63");
+	assert.equal(trace.rewritesReported, true);
+});
+
+test("um produtor que não reporta rewrites nunca vira lista vazia", async () => {
+	const { leadId } = await seedTraceLead("p2");
+	const capture = captureTurnTraceLines();
+
+	try {
+		await generateMarianaResponse({
+			currentMessages: ["como funciona o consórcio?"],
+			// `metadata` sem `rewrites`: o produtor não reportou.
+			generateMarianaReplyFn: async ({ lead }) => buildAiResponse(lead),
+			leadId,
+			traceTurnId: "6d4e8b1f-2a79-4c35-9e68-3b1d7f5a2c80",
+		});
+	} finally {
+		capture.restore();
+	}
+
+	assert.equal(capture.lines.length, 1);
+
+	const trace = JSON.parse(capture.lines[0]);
+
+	assert.equal(trace.rewritesReported, false);
+	assert.equal(trace.rewrites, null);
+	assert.equal(trace.pureBackendText, null);
+});
+
+test("um turno que falha depois da chamada ao modelo ainda emite uma linha", async () => {
+	const { leadId } = await seedTraceLead("turnerror");
+	const schedulingAvailabilityService = new SchedulingAvailabilityService();
+
+	// Falha depois de um turno de modelo bem-sucedido: o caso que não emitia
+	// linha nenhuma (defeito C-1).
+	schedulingAvailabilityService.getAvailableSlots = () =>
+		Promise.reject(new Error("calendar is down"));
+
+	const capture = captureTurnTraceLines();
+
+	try {
+		await assert.rejects(
+			() =>
+				generateMarianaResponse({
+					currentMessages: [
+						"Olá, quais horários para reunião vocês têm disponíveis?",
+					],
+					generateMarianaReplyFn: async ({ lead }) => buildAiResponse(lead),
+					leadId,
+					schedulingAvailabilityService,
+					traceTurnId: "f4c92e18-6b35-4a7d-8e21-9c5a3f7b1d60",
+				}),
+			/calendar is down/
+		);
+	} finally {
+		capture.restore();
+	}
+
+	assert.equal(capture.lines.length, 1);
+
+	const trace = JSON.parse(capture.lines[0]);
+
+	assert.equal(trace.outcome, "turn_error");
+	assert.equal(trace.guardrailLayer, null);
+	assert.equal(trace.turnId, "f4c92e18-6b35-4a7d-8e21-9c5a3f7b1d60");
+	// O modelo respondeu: os dados dele continuam no rastro.
+	assert.equal(trace.modelVersionReturned, null);
+	assert.equal(trace.sentReplyHash, null);
+});
+
+test("o rastro não inventa latência, versão de modelo nem hash cru", async () => {
+	const { leadId } = await seedTraceLead("honesty");
+	const capture = captureTurnTraceLines();
+
+	try {
+		await generateMarianaResponse({
+			currentMessages: ["como funciona o consórcio?"],
+			// `metadata` sem rewrites, sem latência e sem versão devolvida.
+			generateMarianaReplyFn: async ({ lead }) => buildAiResponse(lead),
+			leadId,
+			traceTurnId: "8b3d6a4f-1c72-4e95-8a60-2d7f4b1e9c38",
+		});
+	} finally {
+		capture.restore();
+	}
+
+	const trace = JSON.parse(capture.lines[0]);
+
+	// C-2: a API não devolveu versão, então o campo "returned" não a inventa.
+	assert.equal(trace.modelVersionReturned, null);
+	// C-3: sem relato do produtor, o hash "cru" seria o texto pós-L1/L3.
+	assert.equal(trace.rewritesReported, false);
+	assert.equal(trace.rawReplyHash, null);
+	assert.equal(trace.rawReplyLength, null);
+	// C-4: a ação foi rebaixada, e o rastro diz por quê.
+	assert.equal(trace.actionBlockedReason, "no_current_scheduling_intent");
+});
+
+test("um guardrail não reporta latência medida", async () => {
+	const { leadId } = await seedTraceLead("latency");
+	const capture = captureTurnTraceLines();
+
+	try {
+		await assert.rejects(
+			() =>
+				generateMarianaResponse({
+					currentMessages: ["como funciona o consórcio?"],
+					generateMarianaReplyFn: () => {
+						const error = new Error(
+							"Mariana reply violates the safety guardrails"
+						);
+
+						Object.assign(error, {
+							turnGuardrailLayer: "L4_safety_assertion",
+							turnRewrites: [],
+						});
+
+						return Promise.reject(error);
+					},
+					leadId,
+					traceTurnId: "5e1a7c93-4d28-4b6f-9c05-3a8e2f6d1b74",
+				}),
+			/safety guardrails/
+		);
+	} finally {
+		capture.restore();
+	}
+
+	const trace = JSON.parse(capture.lines[0]);
+
+	// C-2: nenhuma medição não é latência zero.
+	assert.equal(trace.latencyMs, null);
+	assert.equal(trace.rawReplyHash, null);
+});
+
+test("uma falha de modelo é registrada como model_error, não turn_error", async () => {
+	const { leadId } = await seedTraceLead("modelerror");
+	const capture = captureTurnTraceLines();
+
+	try {
+		await assert.rejects(
+			() =>
+				generateMarianaResponse({
+					currentMessages: ["como funciona o consórcio?"],
+					generateMarianaReplyFn: () =>
+						Promise.reject(
+							new ModelUnavailableError(
+								"Gemini request failed before producing a response",
+								{ kind: "transport" }
+							)
+						),
+					leadId,
+					traceTurnId: "7a2e5d81-3f94-4c62-8b17-6e0a9d4f2c53",
+				}),
+			ModelUnavailableError
+		);
+	} finally {
+		capture.restore();
+	}
+
+	assert.equal(capture.lines.length, 1);
+
+	const trace = JSON.parse(capture.lines[0]);
+
+	assert.equal(trace.outcome, "model_error");
+	assert.equal(trace.guardrailLayer, null);
+	assert.equal(trace.latencyMs, null);
 });

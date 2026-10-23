@@ -7,6 +7,7 @@ import type { InferSelectModel } from "drizzle-orm";
 import { and, eq, sql } from "drizzle-orm";
 
 import { db } from "../../db/connections";
+import { mapRawRow } from "../../db/raw-row";
 import { leads, messages, outboundMessages } from "../../db/schema";
 import { WhatsAppSendError } from "../../integrations/whatsapp/whatsapp-errors";
 import { whatsAppService } from "../../integrations/whatsapp/whatsapp-service";
@@ -41,9 +42,17 @@ export type OutboundExecutionResult =
 	| { status: "retry_scheduled"; messageId: string; error: string }
 	| { messageId: string; error: string; status: "failed" | "unknown" };
 
+/**
+ * Conexão ou transação usada para gravar no outbox. Passar a transação do
+ * chamador torna o enfileiramento atômico com a transição de estado que o
+ * originou.
+ */
+export type OutboundExecutor = Pick<typeof db, "insert" | "select">;
+
 export async function enqueueOutboundMessage({
 	conversationId,
 	eventId,
+	executor = db,
 	idempotencyKey,
 	leadId,
 	messageId,
@@ -52,13 +61,14 @@ export async function enqueueOutboundMessage({
 }: {
 	conversationId: string;
 	eventId?: string;
+	executor?: OutboundExecutor;
 	idempotencyKey: string;
 	leadId?: string;
 	messageId?: string;
 	payload: OutboundMessagePayload;
 	maxAttempts?: number;
 }): Promise<OutboundMessage | undefined> {
-	const [inserted] = await db
+	const [inserted] = await executor
 		.insert(outboundMessages)
 		.values({
 			conversationId,
@@ -77,7 +87,7 @@ export async function enqueueOutboundMessage({
 		return inserted;
 	}
 
-	const [existing] = await db
+	const [existing] = await executor
 		.select()
 		.from(outboundMessages)
 		.where(eq(outboundMessages.idempotencyKey, idempotencyKey))
@@ -86,7 +96,7 @@ export async function enqueueOutboundMessage({
 	return existing;
 }
 
-async function claimNextOutboundMessage({
+export async function claimNextOutboundMessage({
 	conversationId,
 	leaseMs,
 }: {
@@ -124,9 +134,9 @@ async function claimNextOutboundMessage({
     WHERE msg."id" = candidate."id"
     RETURNING msg.*
   `
-	)) as OutboundMessage[];
+	)) as Record<string, unknown>[];
 
-	return rows[0] as OutboundMessage | undefined;
+	return rows[0] ? mapRawRow(outboundMessages, rows[0]) : undefined;
 }
 
 export async function renewOutboundLease({
@@ -193,11 +203,13 @@ async function markOutboundTerminal({
 	leaseToken,
 	status,
 	error,
+	providerMessageId,
 }: {
 	messageId: string;
 	leaseToken: string;
 	status: "failed" | "unknown";
 	error: string;
+	providerMessageId?: string;
 }): Promise<boolean> {
 	const [updated] = await db
 		.update(outboundMessages)
@@ -205,6 +217,7 @@ async function markOutboundTerminal({
 			lastError: error,
 			leaseExpiresAt: null,
 			leaseToken: null,
+			...(providerMessageId ? { providerMessageId } : {}),
 			status,
 			updatedAt: new Date(),
 		})
@@ -267,6 +280,102 @@ async function markOutboundRetryOrFail({
 	}
 
 	return { error: errorMessage, messageId: message.id, status: "failed" };
+}
+
+/**
+ * Registra o resultado de um envio já aceito pela API do WhatsApp.
+ *
+ * A partir daqui a mensagem chegou (ou pode ter chegado) ao cliente, então
+ * nenhuma falha de banco pode devolvê-la para `pending`: isso geraria uma
+ * resposta duplicada. Se gravar `sent` falhar, tenta registrar `unknown` com o
+ * WAMID; se até isso falhar, a linha continua em `sending` e a recuperação de
+ * lease expirado a marca como `unknown`, sem reenviar.
+ */
+async function recordAcceptedSend({
+	message,
+	leaseToken,
+	providerMessageId,
+}: {
+	message: OutboundMessage;
+	leaseToken: string;
+	providerMessageId?: string;
+}): Promise<OutboundExecutionResult> {
+	let recorded: boolean;
+
+	try {
+		recorded = await markOutboundSent({
+			leaseToken,
+			messageId: message.id,
+			providerMessageId,
+		});
+	} catch (error) {
+		const errorMessage = `WhatsApp accepted the message but persisting the sent status failed: ${
+			error instanceof Error ? error.message : String(error)
+		}`;
+		console.error("[Outbound] Failed to persist accepted WhatsApp send:", {
+			error,
+			idempotencyKey: message.idempotencyKey,
+			outboundMessageId: message.id,
+			providerMessageId,
+		});
+
+		try {
+			const marked = await markOutboundTerminal({
+				error: errorMessage,
+				leaseToken,
+				messageId: message.id,
+				providerMessageId,
+				status: "unknown",
+			});
+
+			if (!marked) {
+				return { leaseLost: true, messageId: message.id, status: "lease_lost" };
+			}
+		} catch (fallbackError) {
+			console.error(
+				"[Outbound] Failed to mark accepted WhatsApp send as unknown; stale lease recovery will mark it unknown:",
+				{
+					error: fallbackError,
+					idempotencyKey: message.idempotencyKey,
+					outboundMessageId: message.id,
+					providerMessageId,
+				}
+			);
+		}
+
+		return { error: errorMessage, messageId: message.id, status: "unknown" };
+	}
+
+	if (!recorded) {
+		return { leaseLost: true, messageId: message.id, status: "lease_lost" };
+	}
+
+	if (providerMessageId && message.messageId) {
+		try {
+			await db
+				.update(messages)
+				.set({ externalId: providerMessageId })
+				.where(eq(messages.id, message.messageId));
+		} catch (error) {
+			// O WAMID já está em outbound_messages.providerMessageId e pode ser
+			// reaplicado a partir de lá; o envio em si continua `sent`.
+			console.error(
+				"[Outbound] Failed to link WAMID to assistant message after send:",
+				{
+					assistantMessageId: message.messageId,
+					error,
+					outboundMessageId: message.id,
+					providerMessageId,
+				}
+			);
+		}
+	}
+
+	return {
+		messageId: message.id,
+		providerMessageId,
+		status: "sent",
+	};
 }
 
 /**
@@ -367,8 +476,12 @@ export async function executeNextOutboundMessage({
 
 	const payload = message.payload as unknown as OutboundMessagePayload;
 
+	let response: Awaited<ReturnType<OutboundSender["sendTextMessage"]>>;
+
+	// Só a chamada externa fica neste try: falhas de banco depois de um envio
+	// aceito não podem cair no caminho de retry abaixo.
 	try {
-		const response =
+		response =
 			payload.kind === "buttons"
 				? await sender.sendReplyButtonsMessage(
 						lead.phone,
@@ -376,31 +489,6 @@ export async function executeNextOutboundMessage({
 						payload.buttons
 					)
 				: await sender.sendTextMessage(lead.phone, payload.text);
-
-		const providerMessageId = response.messages[0]?.id;
-
-		const recorded = await markOutboundSent({
-			leaseToken,
-			messageId: message.id,
-			providerMessageId,
-		});
-
-		if (!recorded) {
-			return { leaseLost: true, messageId: message.id, status: "lease_lost" };
-		}
-
-		if (providerMessageId && message.messageId) {
-			await db
-				.update(messages)
-				.set({ externalId: providerMessageId })
-				.where(eq(messages.id, message.messageId));
-		}
-
-		return {
-			messageId: message.id,
-			providerMessageId,
-			status: "sent",
-		};
 	} catch (error) {
 		if (error instanceof WhatsAppSendError) {
 			if (error.uncertain) {
@@ -434,6 +522,12 @@ export async function executeNextOutboundMessage({
 
 		return await markOutboundRetryOrFail({ error, leaseToken, message });
 	}
+
+	return await recordAcceptedSend({
+		leaseToken,
+		message,
+		providerMessageId: response.messages[0]?.id,
+	});
 }
 
 export async function runOutboundMessagesUntilIdle({

@@ -44,14 +44,13 @@ function normalizeText(value: string | null | undefined): string | undefined {
 	return trimmed.length > 0 ? trimmed : undefined;
 }
 
+// Mínimo para oferecer horários: objetivo conhecido (o tipo de consórcio é
+// inferido dele) + cliente quer falar com um consultor, respeitando 18+.
+// Tipo, situação atual e motivação são opcionais e nunca bloqueiam.
 export function isLeadQualified({
 	birthDate,
-	consortiumType,
-	currentSituation,
 	interestedInConsultant,
-	motivation,
 	objective,
-	painPoint,
 }: LeadQualificationInput): boolean {
 	if (
 		birthDate !== null &&
@@ -60,20 +59,9 @@ export function isLeadQualified({
 	) {
 		return false;
 	}
-	const normalizedObjective = normalizeText(objective);
-	const normalizedConsortiumType = normalizeText(consortiumType);
-	const normalizedCurrentSituation = normalizeText(currentSituation);
-	const hasPainPoint =
-		normalizeText(painPoint) !== undefined ||
-		normalizeText(motivation) !== undefined;
-	const normalizedInterestedInConsultant =
-		interestedInConsultant === true || interestedInConsultant === "true";
 
 	return (
-		normalizedObjective !== undefined &&
-		normalizedConsortiumType !== undefined &&
-		hasPainPoint &&
-		normalizedCurrentSituation !== undefined &&
-		normalizedInterestedInConsultant
+		normalizeText(objective) !== undefined &&
+		(interestedInConsultant === true || interestedInConsultant === "true")
 	);
 }

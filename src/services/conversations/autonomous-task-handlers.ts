@@ -1,11 +1,26 @@
 /** biome-ignore-all assist/source/useSortedKeys: <> */
 /** biome-ignore-all lint/complexity/noExcessiveCognitiveComplexity: <> */
+/** biome-ignore-all lint/performance/noAwaitInLoops: <> */
 /** biome-ignore-all lint/style/useFilenamingConvention: <> */
 
-import { and, asc, eq, gt, inArray, isNull } from "drizzle-orm";
-
+import {
+	and,
+	asc,
+	eq,
+	gt,
+	gte,
+	inArray,
+	isNull,
+	lte,
+	or,
+	sql,
+} from "drizzle-orm";
+import { resolveModelName } from "../../ai/agent";
+import { ModelUnavailableError } from "../../ai/model-errors";
 import { db } from "../../db/connections";
 import {
+	appointments,
+	autonomousTasks,
 	consultants,
 	conversations,
 	leads,
@@ -15,6 +30,8 @@ import {
 	schedulingSlots,
 	whatsappWebhookEvents,
 } from "../../db/schema";
+import { env } from "../../env";
+import { enqueueTask } from "../../routes/whatsapp/webhook-whatsapp";
 import { formatSlotDate } from "../../utils/date-formatter";
 import { SchedulingAvailabilityService } from "../calendar/scheduling-availability";
 import { SchedulingCancellationService } from "../calendar/scheduling-cancellation-service";
@@ -26,11 +43,129 @@ import {
 	enqueueOutboundMessage,
 	type OutboundMessagePayload,
 } from "../messaging/outbound-messages";
+import { getOrCreateActiveConversation } from "./active-conversation";
 import {
 	type AutonomousTaskHandler,
 	PermanentAutonomousTaskError,
 } from "./autonomous-task-executor";
 import { generateMarianaResponse } from "./generateMarianaResponse";
+import {
+	buildInboundReplyIdempotencyKey,
+	getInboundBatchCutoffAt,
+	selectInboundMessageBatch,
+} from "./inbound-message-batch";
+import { MODEL_FAILURE_NOTICE } from "./model-failure-notice";
+import {
+	SESSION_CHOICE_ALREADY_RECORDED_TEXT,
+	SESSION_CHOICE_CONTINUE_BUTTON_ID,
+	SESSION_CHOICE_CONTINUE_BUTTON_TITLE,
+	SESSION_CHOICE_NEW_BUTTON_ID,
+	SESSION_CHOICE_NEW_BUTTON_TITLE,
+	SESSION_CHOICE_NEW_CONVERSATION_CONFIRMATION_TEXT,
+	SESSION_CHOICE_PENDING_INVALID_REPLY_TEXT,
+	SESSION_CHOICE_QUESTION_TEXT,
+	SESSION_CHOICE_REMINDER_TEXT,
+} from "./session-choice-policy";
+import {
+	claimSessionChoice,
+	readPendingSessionChoice,
+	type SessionChoiceSnapshot,
+	setQuestionMessage,
+} from "./session-choice-store";
+
+/**
+ * Tipos de task de agendamento que devem ser bloqueados durante uma
+ * escolha de sessão pendente.
+ * Definidos aqui como strings literais para evitar problemas de inicialização
+ * (as constantes exportadas estão no final do arquivo).
+ * Prefixado com _ para evitar erro de unused (usado no executor via import).
+ */
+const _SCHEDULING_TASK_TYPES = new Set([
+	"process_button_reply",
+	"send_consultant_preference_question",
+	"process_consultant_preference_reply",
+	"process_consultant_selection",
+	"send_confirmation_request",
+]);
+
+/**
+ * Verifica se há uma escolha de sessão pendente para a conversa.
+ * Se houver, envia a resposta de pendência (lembrete com botões) e
+ * retorna `true` indicando que o handler deve sair sem efeitos colaterais.
+ *
+ * Reutiliza a mesma lógica de idempotência dos handlers de ask/remind.
+ */
+async function checkPendingSessionChoiceAndRespond({
+	conversationId,
+	eventId,
+	leadId,
+}: {
+	conversationId: string;
+	eventId: string | undefined;
+	leadId: string;
+}): Promise<boolean> {
+	const pending = await readPendingSessionChoice(conversationId);
+	if (!pending) {
+		return false;
+	}
+
+	// Chave de idempotência baseada no eventId ou task.id para evitar
+	// envios duplicados da resposta de pendência.
+	const runKey = `session-choice-guard:${conversationId}:${eventId ?? "no-event"}`;
+
+	const [existingOutbound] = await db
+		.select({ id: outboundMessages.id })
+		.from(outboundMessages)
+		.where(eq(outboundMessages.idempotencyKey, runKey))
+		.limit(1);
+
+	if (existingOutbound) {
+		await markEventProcessed(eventId);
+		return true;
+	}
+
+	const [assistantMessage] = await db
+		.insert(messages)
+		.values({
+			content: SESSION_CHOICE_PENDING_INVALID_REPLY_TEXT,
+			conversationId,
+			role: "assistant",
+		})
+		.returning({ id: messages.id });
+
+	if (!assistantMessage) {
+		throw new Error(
+			"Failed to create assistant message for pending session choice guard"
+		);
+	}
+
+	await db.transaction(async (tx) => {
+		await enqueueOutboundMessage({
+			conversationId,
+			eventId: undefined,
+			executor: tx,
+			idempotencyKey: runKey,
+			leadId,
+			messageId: assistantMessage.id,
+			payload: buttonPayload({
+				body: SESSION_CHOICE_PENDING_INVALID_REPLY_TEXT,
+				buttons: [
+					{
+						id: SESSION_CHOICE_CONTINUE_BUTTON_ID,
+						title: SESSION_CHOICE_CONTINUE_BUTTON_TITLE,
+					},
+					{
+						id: SESSION_CHOICE_NEW_BUTTON_ID,
+						title: SESSION_CHOICE_NEW_BUTTON_TITLE,
+					},
+				],
+			}),
+		});
+	});
+
+	await markEventProcessed(eventId);
+	return true;
+}
 
 const schedulingChoiceService = new SchedulingChoiceService();
 const schedulingConfirmationService = new SchedulingConfirmationService();
@@ -91,14 +226,78 @@ function buttonPayload(payload: {
 }
 
 /**
- * Handler de mensagem de texto de entrada. Processa todas as mensagens ainda
- * não processadas da conversa como um lote (debounce durável), gera a resposta
- * da Mariana e a enfileira no outbox. É idempotente: a chave do outbox é
- * derivada da última mensagem do lote.
+ * A task anchor owns a persisted debounce cohort. Only unprocessed user
+ * messages referenced by inbound tasks in that cohort are included; stale
+ * history without a matching task is never folded into the current reply.
  */
+/**
+ * Passo 11: o modelo falhou, então o cliente recebe o aviso aprovado em vez de
+ * silêncio, e a task **conclui** — nada vai tentar de novo sozinho, o que é
+ * exatamente o que o texto promete.
+ *
+ * Invariantes preservadas: usa o `runKey` que já existe, sem inventar uma
+ * segunda chave de idempotência, então uma reexecução cai no dedup do outbox e
+ * nenhuma mensagem possivelmente aceita pela Meta volta para `pending`; e
+ * marca mensagens e evento como processados exatamente como o caminho de
+ * sucesso, então nenhum evento de entrada é processado duas vezes.
+ */
+async function sendModelFailureNotice({
+	conversationId,
+	error,
+	eventId,
+	leadId,
+	messageIds,
+	runKey,
+}: {
+	conversationId: string;
+	error: ModelUnavailableError;
+	eventId: string | undefined;
+	leadId: string;
+	messageIds: string[];
+	runKey: string;
+}) {
+	const [assistantMessage] = await db
+		.insert(messages)
+		.values({
+			content: MODEL_FAILURE_NOTICE,
+			conversationId,
+			role: "assistant",
+		})
+		.returning({ id: messages.id });
+
+	await enqueueOutboundMessage({
+		conversationId,
+		eventId,
+		idempotencyKey: runKey,
+		leadId,
+		messageId: assistantMessage?.id,
+		payload: { kind: "text", text: MODEL_FAILURE_NOTICE },
+	});
+
+	await markMessagesProcessed(messageIds);
+	await markEventProcessed(eventId);
+
+	console.error({
+		conversationId,
+		event: "mariana_model_failure",
+		kind: error.kind,
+		leadId,
+		model: resolveModelName(),
+	});
+
+	return {
+		assistantMessageId: assistantMessage?.id,
+		modelFailureNotice: true,
+		outboundQueued: true,
+	};
+}
+
 const handleProcessInboundMessage: AutonomousTaskHandler = async ({ task }) => {
-	const { conversationId, payload: taskPayload } = task;
+	const { conversationId, payload: taskPayload, triggerMessageId } = task;
 	const eventId = taskPayload?.eventId as string | undefined;
+	if (!triggerMessageId) {
+		throw new PermanentAutonomousTaskError("Inbound trigger message missing");
+	}
 
 	const [conversation] = await db
 		.select({ id: conversations.id, leadId: conversations.leadId })
@@ -110,21 +309,39 @@ const handleProcessInboundMessage: AutonomousTaskHandler = async ({ task }) => {
 		throw new PermanentAutonomousTaskError("Conversation not found");
 	}
 
-	const unprocessed = await db
+	const batchCandidates = await db
 		.select({
 			content: messages.content,
 			createdAt: messages.createdAt,
 			id: messages.id,
+			taskCreatedAt: autonomousTasks.createdAt,
+			taskId: autonomousTasks.id,
+			taskPayload: autonomousTasks.payload,
 		})
-		.from(messages)
+		.from(autonomousTasks)
+		.innerJoin(messages, eq(messages.id, autonomousTasks.triggerMessageId))
 		.where(
 			and(
+				eq(autonomousTasks.conversationId, conversationId),
+				eq(autonomousTasks.taskType, PROCESS_INBOUND_MESSAGE_TASK),
+				inArray(autonomousTasks.status, ["pending", "processing"]),
+				or(
+					eq(autonomousTasks.id, task.id),
+					and(
+						gte(autonomousTasks.createdAt, task.createdAt),
+						lte(autonomousTasks.createdAt, getInboundBatchCutoffAt(task))
+					)
+				),
 				eq(messages.conversationId, conversationId),
 				eq(messages.role, "user"),
 				isNull(messages.processedAt)
 			)
 		)
-		.orderBy(asc(messages.createdAt));
+		.orderBy(asc(autonomousTasks.createdAt), asc(autonomousTasks.id));
+	const unprocessed = selectInboundMessageBatch({
+		anchorTask: task,
+		candidates: batchCandidates,
+	});
 
 	if (unprocessed.length === 0) {
 		await markEventProcessed(eventId);
@@ -138,7 +355,10 @@ const handleProcessInboundMessage: AutonomousTaskHandler = async ({ task }) => {
 	}
 
 	const messageIds = unprocessed.map((message) => message.id);
-	const runKey = `mariana-reply:${conversationId}:${lastMessage.id}`;
+	const runKey = buildInboundReplyIdempotencyKey(
+		conversationId,
+		triggerMessageId
+	);
 
 	const [existingOutbound] = await db
 		.select({ id: outboundMessages.id })
@@ -158,13 +378,34 @@ const handleProcessInboundMessage: AutonomousTaskHandler = async ({ task }) => {
 		lastMessage.createdAt
 	);
 
-	const marianaResult = await generateMarianaResponse({
-		currentMessages: unprocessed.map((message) => message.content),
-		leadId: conversation.leadId,
-		messageCutoff,
-		messageIds,
-		persistUserMessage: false,
-	});
+	let marianaResult: Awaited<ReturnType<typeof generateMarianaResponse>>;
+
+	try {
+		marianaResult = await generateMarianaResponse({
+			currentMessages: unprocessed.map((message) => message.content),
+			leadId: conversation.leadId,
+			messageCutoff,
+			messageIds,
+			persistUserMessage: false,
+			// A task âncora identifica o turno no rastro.
+			traceTurnId: task.id,
+		});
+	} catch (error) {
+		// Só falha de modelo. Guardrail e erro de banco continuam falhando a
+		// task como hoje: engolir tudo esconderia defeito de verdade.
+		if (!(error instanceof ModelUnavailableError)) {
+			throw error;
+		}
+
+		return await sendModelFailureNotice({
+			conversationId,
+			error,
+			eventId,
+			leadId: conversation.leadId,
+			messageIds,
+			runKey,
+		});
+	}
 
 	const assistantMessageId = marianaResult.assistantMessage?.id;
 
@@ -236,6 +477,19 @@ const handleProcessButtonReply: AutonomousTaskHandler = async ({ task }) => {
 
 	if (!lead) {
 		throw new PermanentAutonomousTaskError("Lead not found");
+	}
+
+	// Guard: se há escolha de sessão pendente, não processar botões de agendamento.
+	// Botões `sessao:` são tratados pelo handler `process_session_choice`.
+	if (!buttonId.startsWith("sessao:")) {
+		const blocked = await checkPendingSessionChoiceAndRespond({
+			conversationId,
+			eventId,
+			leadId: lead.id,
+		});
+		if (blocked) {
+			return { blockedBySessionChoice: true };
+		}
 	}
 
 	await db
@@ -420,15 +674,6 @@ const handleSendConsultantPreferenceQuestion: AutonomousTaskHandler = async ({
 		throw new PermanentAutonomousTaskError("Lead not found");
 	}
 
-	// Atualizar workflow stage para awaiting_consultant_preference
-	await db
-		.update(schedulingSessions)
-		.set({
-			workflowStage: "awaiting_consultant_preference",
-			updatedAt: new Date(),
-		})
-		.where(eq(schedulingSessions.id, schedulingSessionId));
-
 	// Enviar pergunta de preferência com botões interativos
 	const runKey = `consultant-preference:${conversationId}:${schedulingSessionId}`;
 
@@ -443,24 +688,37 @@ const handleSendConsultantPreferenceQuestion: AutonomousTaskHandler = async ({
 		return { deduplicated: true };
 	}
 
-	await enqueueOutboundMessage({
-		conversationId,
-		eventId: null,
-		idempotencyKey: runKey,
-		leadId: lead.id,
-		payload: buttonPayload({
-			body: "Você tem preferência por algum consultor?",
-			buttons: [
-				{
-					id: `pref:${session.id}:has_preference`,
-					title: "Tenho preferência",
-				},
-				{
-					id: `pref:${session.id}:no_preference`,
-					title: "Sem preferência",
-				},
-			],
-		}),
+	// A transição e a mensagem são atômicas: se o outbox falhar, a sessão
+	// continua em awaiting_availability e a nova tentativa reenvia a pergunta.
+	await db.transaction(async (tx) => {
+		await tx
+			.update(schedulingSessions)
+			.set({
+				workflowStage: "awaiting_consultant_preference",
+				updatedAt: new Date(),
+			})
+			.where(eq(schedulingSessions.id, schedulingSessionId));
+
+		await enqueueOutboundMessage({
+			conversationId,
+			eventId: undefined,
+			executor: tx,
+			idempotencyKey: runKey,
+			leadId: lead.id,
+			payload: buttonPayload({
+				body: "Você tem preferência por algum consultor?",
+				buttons: [
+					{
+						id: `pref:${session.id}:has_preference`,
+						title: "Tenho preferência",
+					},
+					{
+						id: `pref:${session.id}:no_preference`,
+						title: "Sem preferência",
+					},
+				],
+			}),
+		});
 	});
 
 	await markEventProcessed(eventId);
@@ -512,6 +770,16 @@ const handleProcessConsultantPreferenceReply: AutonomousTaskHandler = async ({
 
 	if (!lead) {
 		throw new PermanentAutonomousTaskError("Lead not found");
+	}
+
+	// Guard: se há escolha de sessão pendente, não mudar a sessão de agendamento.
+	const blocked = await checkPendingSessionChoiceAndRespond({
+		conversationId,
+		eventId,
+		leadId: lead.id,
+	});
+	if (blocked) {
+		return { blockedBySessionChoice: true };
 	}
 
 	await db
@@ -583,7 +851,7 @@ const handleProcessConsultantPreferenceReply: AutonomousTaskHandler = async ({
 			// Nenhum consultor ativo com disponibilidade
 			await enqueueOutboundMessage({
 				conversationId,
-				eventId: null,
+				eventId: undefined,
 				idempotencyKey: runKey,
 				leadId: lead.id,
 				payload: {
@@ -595,28 +863,30 @@ const handleProcessConsultantPreferenceReply: AutonomousTaskHandler = async ({
 			return { noActiveConsultants: true };
 		}
 
-		// Atualizar workflow stage para awaiting_consultant_selection
-		await db
-			.update(schedulingSessions)
-			.set({
-				workflowStage: "awaiting_consultant_selection",
-				updatedAt: new Date(),
-			})
-			.where(eq(schedulingSessions.id, session.id));
+		// Avança o workflow e envia a lista de consultores na mesma transação.
+		await db.transaction(async (tx) => {
+			await tx
+				.update(schedulingSessions)
+				.set({
+					workflowStage: "awaiting_consultant_selection",
+					updatedAt: new Date(),
+				})
+				.where(eq(schedulingSessions.id, session.id));
 
-		// Enviar lista de consultores com botões
-		await enqueueOutboundMessage({
-			conversationId,
-			eventId: null,
-			idempotencyKey: runKey,
-			leadId: lead.id,
-			payload: buttonPayload({
-				body: "Escolha um consultor:",
-				buttons: activeConsultants.map((c) => ({
-					id: `consultant:${session.id}:${c.id}`,
-					title: c.name,
-				})),
-			}),
+			await enqueueOutboundMessage({
+				conversationId,
+				eventId: undefined,
+				executor: tx,
+				idempotencyKey: runKey,
+				leadId: lead.id,
+				payload: buttonPayload({
+					body: "Escolha um consultor:",
+					buttons: activeConsultants.map((c) => ({
+						id: `consultant:${session.id}:${c.id}`,
+						title: c.name,
+					})),
+				}),
+			});
 		});
 	} else {
 		// Sem preferência - avançar diretamente para seleção de slot
@@ -631,7 +901,7 @@ const handleProcessConsultantPreferenceReply: AutonomousTaskHandler = async ({
 		if (slots.length === 0) {
 			await enqueueOutboundMessage({
 				conversationId,
-				eventId: null,
+				eventId: undefined,
 				idempotencyKey: runKey,
 				leadId: lead.id,
 				payload: {
@@ -643,28 +913,30 @@ const handleProcessConsultantPreferenceReply: AutonomousTaskHandler = async ({
 			return { noSlotsAvailable: true };
 		}
 
-		// Atualizar workflow stage para awaiting_slot_selection
-		await db
-			.update(schedulingSessions)
-			.set({
-				workflowStage: "awaiting_slot_selection",
-				updatedAt: new Date(),
-			})
-			.where(eq(schedulingSessions.id, session.id));
+		// Avança o workflow e envia os slots na mesma transação.
+		await db.transaction(async (tx) => {
+			await tx
+				.update(schedulingSessions)
+				.set({
+					workflowStage: "awaiting_slot_selection",
+					updatedAt: new Date(),
+				})
+				.where(eq(schedulingSessions.id, session.id));
 
-		// Enviar slots como botões
-		await enqueueOutboundMessage({
-			conversationId,
-			eventId: null,
-			idempotencyKey: runKey,
-			leadId: lead.id,
-			payload: buttonPayload({
-				body: "Tenho estes horários disponíveis. Escolha uma opção:",
-				buttons: slots.map((slot) => ({
-					id: slot.id,
-					title: formatSlotTitle(slot.startAt),
-				})),
-			}),
+			await enqueueOutboundMessage({
+				conversationId,
+				eventId: undefined,
+				executor: tx,
+				idempotencyKey: runKey,
+				leadId: lead.id,
+				payload: buttonPayload({
+					body: "Tenho estes horários disponíveis. Escolha uma opção:",
+					buttons: slots.map((slot) => ({
+						id: slot.id,
+						title: formatSlotTitle(slot.startAt),
+					})),
+				}),
+			});
 		});
 	}
 
@@ -715,6 +987,16 @@ const handleProcessConsultantSelection: AutonomousTaskHandler = async ({
 
 	if (!lead) {
 		throw new PermanentAutonomousTaskError("Lead not found");
+	}
+
+	// Guard: se há escolha de sessão pendente, não mudar a sessão de agendamento.
+	const blocked = await checkPendingSessionChoiceAndRespond({
+		conversationId,
+		eventId,
+		leadId: lead.id,
+	});
+	if (blocked) {
+		return { blockedBySessionChoice: true };
 	}
 
 	await db
@@ -786,29 +1068,31 @@ const handleProcessConsultantSelection: AutonomousTaskHandler = async ({
 		return { deduplicated: true };
 	}
 
-	// Persistir preferência de consultor na sessão
-	await db
-		.update(schedulingSessions)
-		.set({
-			preferredConsultantId: consultantId,
-			workflowStage: "awaiting_slot_selection",
-			updatedAt: new Date(),
-		})
-		.where(eq(schedulingSessions.id, session.id));
+	// Persiste a preferência e envia os slots do consultor na mesma transação.
+	await db.transaction(async (tx) => {
+		await tx
+			.update(schedulingSessions)
+			.set({
+				preferredConsultantId: consultantId,
+				workflowStage: "awaiting_slot_selection",
+				updatedAt: new Date(),
+			})
+			.where(eq(schedulingSessions.id, session.id));
 
-	// Enviar slots do consultor selecionado
-	await enqueueOutboundMessage({
-		conversationId,
-		eventId: null,
-		idempotencyKey: runKey,
-		leadId: lead.id,
-		payload: buttonPayload({
-			body: `Horários disponíveis com ${consultantSlots[0].consultantName}:`,
-			buttons: consultantSlots.map((slot) => ({
-				id: slot.id,
-				title: formatSlotTitle(slot.startAt),
-			})),
-		}),
+		await enqueueOutboundMessage({
+			conversationId,
+			eventId: undefined,
+			executor: tx,
+			idempotencyKey: runKey,
+			leadId: lead.id,
+			payload: buttonPayload({
+				body: `Horários disponíveis com ${consultantSlots[0].consultantName}:`,
+				buttons: consultantSlots.map((slot) => ({
+					id: slot.id,
+					title: formatSlotTitle(slot.startAt),
+				})),
+			}),
+		});
 	});
 
 	await markEventProcessed(eventId);
@@ -851,6 +1135,16 @@ const handleSendConfirmationRequest: AutonomousTaskHandler = async ({
 		throw new PermanentAutonomousTaskError("Lead not found");
 	}
 
+	// Guard: se há escolha de sessão pendente, não enviar pedido de confirmação.
+	const blocked = await checkPendingSessionChoiceAndRespond({
+		conversationId,
+		eventId,
+		leadId: lead.id,
+	});
+	if (blocked) {
+		return { blockedBySessionChoice: true };
+	}
+
 	await db
 		.update(conversations)
 		.set({ lastCustomerMessageAt: new Date(), updatedAt: new Date() })
@@ -885,31 +1179,6 @@ const handleSendConfirmationRequest: AutonomousTaskHandler = async ({
 		return { skipped: true, reason: choiceResult.reason };
 	}
 
-	// Atualizar workflow stage para awaiting_confirmation
-	const [confirmationSession] = await db
-		.update(schedulingSessions)
-		.set({
-			workflowStage: "awaiting_confirmation",
-			updatedAt: new Date(),
-		})
-		.where(
-			and(
-				eq(schedulingSessions.id, session.id),
-				eq(schedulingSessions.leadId, lead.id),
-				eq(schedulingSessions.conversationId, conversationId),
-				eq(schedulingSessions.status, "active"),
-				eq(schedulingSessions.workflowStage, "awaiting_slot_selection"),
-				eq(schedulingSessions.selectedSlotId, choiceResult.slot.id),
-				gt(schedulingSessions.expiresAt, new Date())
-			)
-		)
-		.returning({ id: schedulingSessions.id });
-
-	if (!confirmationSession) {
-		await markEventProcessed(eventId);
-		return { skipped: true, reason: "session_changed_before_confirmation" };
-	}
-
 	const runKey = `confirmation-request:${conversationId}:${externalId ?? buttonId}`;
 
 	const [existingOutbound] = await db
@@ -928,16 +1197,558 @@ const handleSendConfirmationRequest: AutonomousTaskHandler = async ({
 		choiceResult.slot
 	);
 
-	await enqueueOutboundMessage({
-		conversationId,
-		eventId: null,
-		idempotencyKey: runKey,
-		leadId: lead.id,
-		payload: buttonPayload(confirmation),
+	// Atualizar workflow stage para awaiting_confirmation e enfileirar o
+	// pedido na mesma transação: se o outbox falhar, a sessão continua em
+	// awaiting_slot_selection e a nova tentativa refaz o pedido.
+	const transitioned = await db.transaction(async (tx) => {
+		const [confirmationSession] = await tx
+			.update(schedulingSessions)
+			.set({
+				workflowStage: "awaiting_confirmation",
+				updatedAt: new Date(),
+			})
+			.where(
+				and(
+					eq(schedulingSessions.id, session.id),
+					eq(schedulingSessions.leadId, lead.id),
+					eq(schedulingSessions.conversationId, conversationId),
+					eq(schedulingSessions.status, "active"),
+					eq(schedulingSessions.workflowStage, "awaiting_slot_selection"),
+					eq(schedulingSessions.selectedSlotId, choiceResult.slot.id),
+					gt(schedulingSessions.expiresAt, new Date())
+				)
+			)
+			.returning({ id: schedulingSessions.id });
+
+		if (!confirmationSession) {
+			return false;
+		}
+
+		await enqueueOutboundMessage({
+			conversationId,
+			eventId: undefined,
+			executor: tx,
+			idempotencyKey: runKey,
+			leadId: lead.id,
+			payload: buttonPayload(confirmation),
+		});
+
+		return true;
 	});
+
+	if (!transitioned) {
+		await markEventProcessed(eventId);
+		return { skipped: true, reason: "session_changed_before_confirmation" };
+	}
 
 	await markEventProcessed(eventId);
 	return { confirmationRequestSent: true };
+};
+
+const handleAskSessionChoice: AutonomousTaskHandler = async ({ task }) => {
+	const { conversationId, payload: taskPayload } = task;
+	const eventId = taskPayload?.eventId as string | undefined;
+
+	const pending = await readPendingSessionChoice(conversationId);
+	if (!pending) {
+		return { skipped: true, reason: "no_pending_session_choice" };
+	}
+
+	const [conversation] = await db
+		.select({ id: conversations.id, leadId: conversations.leadId })
+		.from(conversations)
+		.where(eq(conversations.id, conversationId))
+		.limit(1);
+
+	if (!conversation) {
+		throw new PermanentAutonomousTaskError("Conversation not found");
+	}
+
+	const runKey = `session-choice-question:${conversationId}:${pending.askedAt}`;
+
+	const [existingOutbound] = await db
+		.select({ id: outboundMessages.id })
+		.from(outboundMessages)
+		.where(eq(outboundMessages.idempotencyKey, runKey))
+		.limit(1);
+
+	if (existingOutbound && pending.questionMessageId) {
+		await markEventProcessed(eventId);
+		return { deduplicated: true };
+	}
+
+	const [assistantMessage] = await db
+		.insert(messages)
+		.values({
+			content: SESSION_CHOICE_QUESTION_TEXT,
+			conversationId,
+			role: "assistant",
+		})
+		.returning({ id: messages.id });
+
+	if (!assistantMessage) {
+		throw new Error("Failed to create assistant message");
+	}
+
+	await db.transaction(async (tx) => {
+		await enqueueOutboundMessage({
+			conversationId,
+			eventId: undefined,
+			executor: tx,
+			idempotencyKey: runKey,
+			leadId: conversation.leadId,
+			messageId: assistantMessage.id,
+			payload: buttonPayload({
+				body: SESSION_CHOICE_QUESTION_TEXT,
+				buttons: [
+					{
+						id: SESSION_CHOICE_CONTINUE_BUTTON_ID,
+						title: SESSION_CHOICE_CONTINUE_BUTTON_TITLE,
+					},
+					{
+						id: SESSION_CHOICE_NEW_BUTTON_ID,
+						title: SESSION_CHOICE_NEW_BUTTON_TITLE,
+					},
+				],
+			}),
+		});
+
+		await setQuestionMessage({
+			conversationId,
+			executor: tx,
+			questionMessageId: assistantMessage.id,
+		});
+	});
+
+	await markEventProcessed(eventId);
+	return { questionSent: true, assistantMessageId: assistantMessage.id };
+};
+
+const handleRemindSessionChoice: AutonomousTaskHandler = async ({ task }) => {
+	const { conversationId, payload: taskPayload } = task;
+	const eventId = taskPayload?.eventId as string | undefined;
+
+	const pending = await readPendingSessionChoice(conversationId);
+	if (!pending) {
+		return { skipped: true, reason: "no_pending_session_choice" };
+	}
+
+	const [conversation] = await db
+		.select({ id: conversations.id, leadId: conversations.leadId })
+		.from(conversations)
+		.where(eq(conversations.id, conversationId))
+		.limit(1);
+
+	if (!conversation) {
+		throw new PermanentAutonomousTaskError("Conversation not found");
+	}
+
+	const runKey = `session-choice-remind:${conversationId}:${taskPayload?.eventExternalId ?? eventId ?? task.id}`;
+
+	const [existingOutbound] = await db
+		.select({ id: outboundMessages.id })
+		.from(outboundMessages)
+		.where(eq(outboundMessages.idempotencyKey, runKey))
+		.limit(1);
+
+	if (existingOutbound) {
+		await markEventProcessed(eventId);
+		return { deduplicated: true };
+	}
+
+	const [assistantMessage] = await db
+		.insert(messages)
+		.values({
+			content: SESSION_CHOICE_REMINDER_TEXT,
+			conversationId,
+			role: "assistant",
+		})
+		.returning({ id: messages.id });
+
+	if (!assistantMessage) {
+		throw new Error("Failed to create assistant message");
+	}
+
+	await db.transaction(async (tx) => {
+		await enqueueOutboundMessage({
+			conversationId,
+			eventId: undefined,
+			executor: tx,
+			idempotencyKey: runKey,
+			leadId: conversation.leadId,
+			messageId: assistantMessage.id,
+			payload: buttonPayload({
+				body: SESSION_CHOICE_REMINDER_TEXT,
+				buttons: [
+					{
+						id: SESSION_CHOICE_CONTINUE_BUTTON_ID,
+						title: SESSION_CHOICE_CONTINUE_BUTTON_TITLE,
+					},
+					{
+						id: SESSION_CHOICE_NEW_BUTTON_ID,
+						title: SESSION_CHOICE_NEW_BUTTON_TITLE,
+					},
+				],
+			}),
+		});
+	});
+
+	await markEventProcessed(eventId);
+	return { reminded: true, assistantMessageId: assistantMessage.id };
+};
+
+async function createInboundTasksForMessages({
+	conversationId,
+	eventId,
+	executor = db,
+	messagesList,
+}: {
+	conversationId: string;
+	eventId?: string;
+	executor?: Pick<typeof db, "insert">;
+	messagesList: Array<{
+		createdAt: Date;
+		externalId: string | null;
+		id: string;
+	}>;
+}) {
+	const batchCutoffAt = new Date(Date.now() + env.MESSAGE_DEBOUNCE_MS);
+	for (const message of messagesList) {
+		await enqueueTask({
+			availableAt: batchCutoffAt,
+			conversationId,
+			createdAt: message.createdAt,
+			executor,
+			idempotencyKey: `session-choice-continue:${conversationId}:${message.id}`,
+			payload: {
+				batchCutoffAt: batchCutoffAt.toISOString(),
+				eventExternalId: message.externalId ?? undefined,
+				eventId,
+				kind: "text",
+				source: "session_choice_continue",
+			},
+			preserveExisting: true,
+			taskType: PROCESS_INBOUND_MESSAGE_TASK,
+			triggerMessageId: message.id,
+		});
+	}
+}
+
+const handleProcessSessionChoice: AutonomousTaskHandler = async ({ task }) => {
+	const { conversationId, payload: taskPayload } = task;
+	const eventId = taskPayload?.eventId as string | undefined;
+	const buttonId = taskPayload?.buttonId as string | undefined;
+	const kind = taskPayload?.kind as string | undefined;
+	const externalId = taskPayload?.eventExternalId as string | undefined;
+
+	const pending = await readPendingSessionChoice(conversationId);
+	if (!pending) {
+		const runKey = `session-choice-reply:${conversationId}:${externalId ?? buttonId ?? task.id}`;
+		const [existingOutbound] = await db
+			.select({ id: outboundMessages.id })
+			.from(outboundMessages)
+			.where(eq(outboundMessages.idempotencyKey, runKey))
+			.limit(1);
+		if (existingOutbound) {
+			await markEventProcessed(eventId);
+			return { deduplicated: true };
+		}
+		const [conversation] = await db
+			.select({ leadId: conversations.leadId })
+			.from(conversations)
+			.where(eq(conversations.id, conversationId))
+			.limit(1);
+		if (conversation) {
+			await enqueueOutboundMessage({
+				conversationId,
+				eventId,
+				idempotencyKey: runKey,
+				leadId: conversation.leadId,
+				payload: { kind: "text", text: SESSION_CHOICE_ALREADY_RECORDED_TEXT },
+			});
+		}
+		await markEventProcessed(eventId);
+		return { alreadyRecorded: true };
+	}
+
+	if (kind === "invalid" || !buttonId?.startsWith("sessao:")) {
+		const runKey = `session-choice-invalid:${conversationId}:${externalId ?? buttonId ?? task.id}`;
+		const [existingOutbound] = await db
+			.select({ id: outboundMessages.id })
+			.from(outboundMessages)
+			.where(eq(outboundMessages.idempotencyKey, runKey))
+			.limit(1);
+		if (existingOutbound) {
+			await markEventProcessed(eventId);
+			return { deduplicated: true };
+		}
+		const [conversation] = await db
+			.select({ leadId: conversations.leadId })
+			.from(conversations)
+			.where(eq(conversations.id, conversationId))
+			.limit(1);
+		if (conversation) {
+			await enqueueOutboundMessage({
+				conversationId,
+				eventId,
+				idempotencyKey: runKey,
+				leadId: conversation.leadId,
+				payload: buttonPayload({
+					body: SESSION_CHOICE_PENDING_INVALID_REPLY_TEXT,
+					buttons: [
+						{
+							id: SESSION_CHOICE_CONTINUE_BUTTON_ID,
+							title: SESSION_CHOICE_CONTINUE_BUTTON_TITLE,
+						},
+						{
+							id: SESSION_CHOICE_NEW_BUTTON_ID,
+							title: SESSION_CHOICE_NEW_BUTTON_TITLE,
+						},
+					],
+				}),
+			});
+		}
+		await markEventProcessed(eventId);
+		return { resentQuestion: true };
+	}
+
+	const claimed = await claimSessionChoice({
+		conversationId,
+		state: buttonId === SESSION_CHOICE_NEW_BUTTON_ID ? "new" : "continue",
+	});
+
+	if (!claimed) {
+		const runKey = `session-choice-reply:${conversationId}:${externalId ?? buttonId ?? task.id}`;
+		const [existingOutbound] = await db
+			.select({ id: outboundMessages.id })
+			.from(outboundMessages)
+			.where(eq(outboundMessages.idempotencyKey, runKey))
+			.limit(1);
+		if (existingOutbound) {
+			await markEventProcessed(eventId);
+			return { deduplicated: true };
+		}
+		const [conversation] = await db
+			.select({ leadId: conversations.leadId })
+			.from(conversations)
+			.where(eq(conversations.id, conversationId))
+			.limit(1);
+		if (conversation) {
+			await enqueueOutboundMessage({
+				conversationId,
+				eventId,
+				idempotencyKey: runKey,
+				leadId: conversation.leadId,
+				payload: { kind: "text", text: SESSION_CHOICE_ALREADY_RECORDED_TEXT },
+			});
+		}
+		await markEventProcessed(eventId);
+		return { alreadyRecorded: true };
+	}
+
+	if (claimed.state === "continue") {
+		await db.transaction(async (tx) => {
+			const unprocessed = await tx
+				.select({
+					createdAt: messages.createdAt,
+					externalId: messages.externalId,
+					id: messages.id,
+				})
+				.from(messages)
+				.where(
+					and(
+						eq(messages.conversationId, conversationId),
+						eq(messages.role, "user"),
+						isNull(messages.processedAt)
+					)
+				)
+				.orderBy(asc(messages.createdAt), asc(messages.id));
+
+			if (unprocessed.length > 0) {
+				await createInboundTasksForMessages({
+					conversationId,
+					eventId,
+					executor: tx,
+					messagesList: unprocessed,
+				});
+			}
+		});
+
+		await markEventProcessed(eventId);
+		return { continued: true };
+	}
+
+	if (claimed.state === "new") {
+		await db.transaction(async (tx) => {
+			const [conversation] = await tx
+				.select()
+				.from(conversations)
+				.where(eq(conversations.id, conversationId))
+				.for("update")
+				.limit(1);
+
+			if (!conversation) {
+				throw new PermanentAutonomousTaskError("Conversation not found");
+			}
+
+			const [lead] = await tx
+				.select()
+				.from(leads)
+				.where(eq(leads.id, conversation.leadId))
+				.for("update")
+				.limit(1);
+
+			if (!lead) {
+				throw new PermanentAutonomousTaskError("Lead not found");
+			}
+
+			const snapshot: SessionChoiceSnapshot = {
+				commercialApproach: lead.commercialApproach,
+				consortiumType: lead.consortiumType,
+				currentSituation: lead.currentSituation,
+				interestedInConsultant: lead.interestedInConsultant,
+				objective: lead.objective,
+				painPoint: lead.painPoint,
+				qualifiedAt: lead.qualifiedAt ? lead.qualifiedAt.toISOString() : null,
+				status: lead.status,
+				urgency: lead.urgency,
+			};
+
+			await tx
+				.update(leads)
+				.set({
+					commercialApproach: null,
+					consortiumType: null,
+					currentSituation: null,
+					interestedInConsultant: false,
+					objective: null,
+					painPoint: null,
+					qualifiedAt: null,
+					urgency: null,
+					updatedAt: new Date(),
+				})
+				.where(eq(leads.id, lead.id));
+
+			await tx
+				.update(autonomousTasks)
+				.set({
+					payload: sql`${autonomousTasks.payload} || ${JSON.stringify({ snapshot })}::jsonb`,
+					updatedAt: new Date(),
+				})
+				.where(
+					and(
+						eq(autonomousTasks.conversationId, conversation.id),
+						eq(autonomousTasks.taskType, SESSION_CHOICE_STATE_TASK)
+					)
+				);
+
+			await tx
+				.update(conversations)
+				.set({ status: "closed", updatedAt: new Date() })
+				.where(eq(conversations.id, conversation.id));
+
+			await tx
+				.update(schedulingSessions)
+				.set({ status: "expired", updatedAt: new Date() })
+				.where(
+					and(
+						eq(schedulingSessions.leadId, lead.id),
+						eq(schedulingSessions.status, "active")
+					)
+				);
+
+			const { conversation: newConversation } =
+				await getOrCreateActiveConversation(tx, lead.id);
+
+			await tx
+				.update(conversations)
+				.set({
+					lastCustomerMessageAt: conversation.lastCustomerMessageAt,
+					optOutAt: conversation.optOutAt,
+					updatedAt: new Date(),
+				})
+				.where(eq(conversations.id, newConversation.id));
+
+			const unprocessed = await tx
+				.select({
+					createdAt: messages.createdAt,
+					externalId: messages.externalId,
+					id: messages.id,
+				})
+				.from(messages)
+				.where(
+					and(
+						eq(messages.conversationId, conversation.id),
+						eq(messages.role, "user"),
+						isNull(messages.processedAt)
+					)
+				)
+				.orderBy(asc(messages.createdAt), asc(messages.id));
+
+			if (unprocessed.length > 0) {
+				await tx
+					.update(messages)
+					.set({ conversationId: newConversation.id })
+					.where(
+						inArray(
+							messages.id,
+							unprocessed.map((m) => m.id)
+						)
+					);
+
+				await createInboundTasksForMessages({
+					conversationId: newConversation.id,
+					eventId,
+					executor: tx,
+					messagesList: unprocessed,
+				});
+			}
+
+			const [futureAppointment] = await tx
+				.select({ id: appointments.id })
+				.from(appointments)
+				.where(
+					and(
+						eq(appointments.leadId, lead.id),
+						inArray(appointments.status, ["confirmed", "scheduled"]),
+						gt(appointments.startAt, new Date())
+					)
+				)
+				.limit(1);
+
+			if (futureAppointment) {
+				if (lead.status !== "scheduled") {
+					await tx
+						.update(leads)
+						.set({ status: "scheduled", updatedAt: new Date() })
+						.where(eq(leads.id, lead.id));
+				}
+			} else if (lead.status === "scheduled") {
+				await tx
+					.update(leads)
+					.set({ status: "new", qualifiedAt: null, updatedAt: new Date() })
+					.where(eq(leads.id, lead.id));
+			}
+
+			await enqueueOutboundMessage({
+				conversationId: newConversation.id,
+				eventId,
+				executor: tx,
+				idempotencyKey: `session-choice-new-confirm:${newConversation.id}:${claimed.resolvedAt ?? Date.now()}`,
+				leadId: lead.id,
+				payload: {
+					kind: "text",
+					text: SESSION_CHOICE_NEW_CONVERSATION_CONFIRMATION_TEXT,
+				},
+			});
+		});
+
+		await markEventProcessed(eventId);
+		return { newConversation: true };
+	}
+
+	await markEventProcessed(eventId);
+	return { processed: true };
 };
 
 export const PROCESS_INBOUND_MESSAGE_TASK = "process_inbound_message";
@@ -948,6 +1759,10 @@ export const PROCESS_CONSULTANT_PREFERENCE_REPLY_TASK =
 	"process_consultant_preference_reply";
 export const PROCESS_CONSULTANT_SELECTION_TASK = "process_consultant_selection";
 export const SEND_CONFIRMATION_REQUEST_TASK = "send_confirmation_request";
+export const SESSION_CHOICE_STATE_TASK = "session_choice_state";
+export const ASK_SESSION_CHOICE_TASK = "ask_session_choice";
+export const REMIND_SESSION_CHOICE_TASK = "remind_session_choice";
+export const PROCESS_SESSION_CHOICE_TASK = "process_session_choice";
 
 export function createAutonomousTaskHandlers(): Record<
 	string,
@@ -962,5 +1777,8 @@ export function createAutonomousTaskHandlers(): Record<
 			handleProcessConsultantPreferenceReply,
 		[PROCESS_CONSULTANT_SELECTION_TASK]: handleProcessConsultantSelection,
 		[SEND_CONFIRMATION_REQUEST_TASK]: handleSendConfirmationRequest,
+		[ASK_SESSION_CHOICE_TASK]: handleAskSessionChoice,
+		[REMIND_SESSION_CHOICE_TASK]: handleRemindSessionChoice,
+		[PROCESS_SESSION_CHOICE_TASK]: handleProcessSessionChoice,
 	};
 }

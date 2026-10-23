@@ -5,7 +5,7 @@
 /** biome-ignore-all lint/correctness/noUnusedVariables: <> */
 import fastify from "fastify";
 import { env } from "./env";
-import { loggerConfig } from "./lib/logger";
+import { loggerConfig, redactSensitiveQuery } from "./lib/logger";
 import {
 	serializerCompiler,
 	validatorCompiler,
@@ -48,7 +48,7 @@ app.setSerializerCompiler(serializerCompiler);
 app.addHook("onResponse", async (request, reply) => {
 	app.log.info({
 		method: request.method,
-		url: request.url,
+		url: redactSensitiveQuery(request.url),
 		statusCode: reply.statusCode,
 	});
 });
