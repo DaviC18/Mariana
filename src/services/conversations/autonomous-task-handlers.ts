@@ -73,6 +73,100 @@ import {
 	setQuestionMessage,
 } from "./session-choice-store";
 
+/**
+ * Tipos de task de agendamento que devem ser bloqueados durante uma
+ * escolha de sessão pendente.
+ * Definidos aqui como strings literais para evitar problemas de inicialização
+ * (as constantes exportadas estão no final do arquivo).
+ * Prefixado com _ para evitar erro de unused (usado no executor via import).
+ */
+const _SCHEDULING_TASK_TYPES = new Set([
+	"process_button_reply",
+	"send_consultant_preference_question",
+	"process_consultant_preference_reply",
+	"process_consultant_selection",
+	"send_confirmation_request",
+]);
+
+/**
+ * Verifica se há uma escolha de sessão pendente para a conversa.
+ * Se houver, envia a resposta de pendência (lembrete com botões) e
+ * retorna `true` indicando que o handler deve sair sem efeitos colaterais.
+ *
+ * Reutiliza a mesma lógica de idempotência dos handlers de ask/remind.
+ */
+async function checkPendingSessionChoiceAndRespond({
+	conversationId,
+	eventId,
+	leadId,
+}: {
+	conversationId: string;
+	eventId: string | undefined;
+	leadId: string;
+}): Promise<boolean> {
+	const pending = await readPendingSessionChoice(conversationId);
+	if (!pending) {
+		return false;
+	}
+
+	// Chave de idempotência baseada no eventId ou task.id para evitar
+	// envios duplicados da resposta de pendência.
+	const runKey = `session-choice-guard:${conversationId}:${eventId ?? "no-event"}`;
+
+	const [existingOutbound] = await db
+		.select({ id: outboundMessages.id })
+		.from(outboundMessages)
+		.where(eq(outboundMessages.idempotencyKey, runKey))
+		.limit(1);
+
+	if (existingOutbound) {
+		await markEventProcessed(eventId);
+		return true;
+	}
+
+	const [assistantMessage] = await db
+		.insert(messages)
+		.values({
+			content: SESSION_CHOICE_PENDING_INVALID_REPLY_TEXT,
+			conversationId,
+			role: "assistant",
+		})
+		.returning({ id: messages.id });
+
+	if (!assistantMessage) {
+		throw new Error(
+			"Failed to create assistant message for pending session choice guard"
+		);
+	}
+
+	await db.transaction(async (tx) => {
+		await enqueueOutboundMessage({
+			conversationId,
+			eventId: undefined,
+			executor: tx,
+			idempotencyKey: runKey,
+			leadId,
+			messageId: assistantMessage.id,
+			payload: buttonPayload({
+				body: SESSION_CHOICE_PENDING_INVALID_REPLY_TEXT,
+				buttons: [
+					{
+						id: SESSION_CHOICE_CONTINUE_BUTTON_ID,
+						title: SESSION_CHOICE_CONTINUE_BUTTON_TITLE,
+					},
+					{
+						id: SESSION_CHOICE_NEW_BUTTON_ID,
+						title: SESSION_CHOICE_NEW_BUTTON_TITLE,
+					},
+				],
+			}),
+		});
+	});
+
+	await markEventProcessed(eventId);
+	return true;
+}
+
 const schedulingChoiceService = new SchedulingChoiceService();
 const schedulingConfirmationService = new SchedulingConfirmationService();
 const schedulingConfirmationOrchestrator =
@@ -385,6 +479,19 @@ const handleProcessButtonReply: AutonomousTaskHandler = async ({ task }) => {
 		throw new PermanentAutonomousTaskError("Lead not found");
 	}
 
+	// Guard: se há escolha de sessão pendente, não processar botões de agendamento.
+	// Botões `sessao:` são tratados pelo handler `process_session_choice`.
+	if (!buttonId.startsWith("sessao:")) {
+		const blocked = await checkPendingSessionChoiceAndRespond({
+			conversationId,
+			eventId,
+			leadId: lead.id,
+		});
+		if (blocked) {
+			return { blockedBySessionChoice: true };
+		}
+	}
+
 	await db
 		.update(conversations)
 		.set({ lastCustomerMessageAt: new Date(), updatedAt: new Date() })
@@ -665,6 +772,16 @@ const handleProcessConsultantPreferenceReply: AutonomousTaskHandler = async ({
 		throw new PermanentAutonomousTaskError("Lead not found");
 	}
 
+	// Guard: se há escolha de sessão pendente, não mudar a sessão de agendamento.
+	const blocked = await checkPendingSessionChoiceAndRespond({
+		conversationId,
+		eventId,
+		leadId: lead.id,
+	});
+	if (blocked) {
+		return { blockedBySessionChoice: true };
+	}
+
 	await db
 		.update(conversations)
 		.set({ lastCustomerMessageAt: new Date(), updatedAt: new Date() })
@@ -872,6 +989,16 @@ const handleProcessConsultantSelection: AutonomousTaskHandler = async ({
 		throw new PermanentAutonomousTaskError("Lead not found");
 	}
 
+	// Guard: se há escolha de sessão pendente, não mudar a sessão de agendamento.
+	const blocked = await checkPendingSessionChoiceAndRespond({
+		conversationId,
+		eventId,
+		leadId: lead.id,
+	});
+	if (blocked) {
+		return { blockedBySessionChoice: true };
+	}
+
 	await db
 		.update(conversations)
 		.set({ lastCustomerMessageAt: new Date(), updatedAt: new Date() })
@@ -1006,6 +1133,16 @@ const handleSendConfirmationRequest: AutonomousTaskHandler = async ({
 
 	if (!lead) {
 		throw new PermanentAutonomousTaskError("Lead not found");
+	}
+
+	// Guard: se há escolha de sessão pendente, não enviar pedido de confirmação.
+	const blocked = await checkPendingSessionChoiceAndRespond({
+		conversationId,
+		eventId,
+		leadId: lead.id,
+	});
+	if (blocked) {
+		return { blockedBySessionChoice: true };
 	}
 
 	await db

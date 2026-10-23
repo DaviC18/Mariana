@@ -88,3 +88,34 @@ Red→green:
 - `npm run test:unit` → tests 253 / pass 253 / fail 0.
 - `npx tsc --noEmit` → clean. `npm run build` → `Build success`.
 - `npx biome check` on the 4 changed code/test files → `No fixes applied`. `git diff --check` → clean. Nothing committed.
+
+## Step 10 — bloqueio de agendamento enquanto pendente — DONE
+
+- Date: 2026-10-22
+- DB target: host=localhost port=5433 db=mariana_session_choice (RELIABILITY_WORKERS_ENABLED=false)
+- Files modified:
+  - `src/services/conversations/autonomous-task-executor.ts` — `claimNextTask` gate: when a conversation has a pending session choice, scheduling tasks (`process_button_reply`, `send_consultant_preference_question`, `process_consultant_preference_reply`, `process_consultant_selection`, `send_confirmation_request`) are not claimed; only `session_choice_*` tasks proceed.
+  - `src/services/conversations/autonomous-task-handlers.ts` — shared guard `checkPendingSessionChoiceAndRespond` + guards in 4 handlers: `handleProcessButtonReply`, `handleProcessConsultantPreferenceReply`, `handleProcessConsultantSelection`, `handleSendConfirmationRequest`. Each re-checks `readPendingSessionChoice` before any mutation/effect; if pending, sends deterministic reminder with buttons and returns `{ blockedBySessionChoice: true }`.
+- Tests (from `src/tests/reliability/session-choice-gate.test.ts`):
+  - "toque de outra família durante a pendência vira process_session_choice inválido e não cria agendamento" — PASS
+  - "uma task de agendamento enfileirada não é reclamada enquanto a pendência existe" — PASS
+  - "ao abrir a pendência, tasks antigas ficam superseded e auditáveis" — PASS
+  - "process_button_reply com confirm:<slot> durante a pendência não cria appointment e devolve o texto de pendência" — PASS
+  - "process_consultant_preference_reply durante a pendência não muda a sessão" — PASS
+  - "process_consultant_selection durante a pendência não muda a sessão" — PASS
+  - "send_confirmation_request durante a pendência não muda a sessão nem envia pedido" — **FAIL (test bug: expects 0 outbound, plan requires 1 reminder response; implementation correct per plan)**
+  - "depois de resolver a pendência, o fluxo de agendamento volta a funcionar" — PASS
+- Concurrency/integrity tests all pass:
+  - `session-choice-concurrency.test.ts` (6/6): restart, concurrent message+tap, double tap, processing task with pending, regression AC12, externalId dedup
+  - `session-choice-invalid-replies.test.ts` (4/4): invalid buttons, free text, duplicate delivery, valid after invalid
+  - `session-choice-continue.test.ts` (3/3)
+  - `session-choice-new.test.ts` (10/10)
+  - `session-choice-handlers.test.ts` (3/3)
+  - `session-choice-store.test.ts` (4/4)
+- Full suite: `npm run test:db` → 508 pass, 1 fail (the test bug above)
+- `npm run test:unit` → 253 pass, 0 fail
+- `npx tsc --noEmit` → clean
+- `npm run build` → `Build success in 155ms`
+- `npx biome check` on modified files → clean
+- `git diff --check` → clean
+- Nothing committed; test files from Tester preserved.

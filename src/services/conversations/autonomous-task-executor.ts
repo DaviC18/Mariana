@@ -10,6 +10,7 @@ import {
 	type AutonomousTask,
 	mapAutonomousTaskRow,
 } from "./autonomous-task-row";
+import { readPendingSessionChoice } from "./session-choice-store";
 
 export type { AutonomousTask } from "./autonomous-task-row";
 
@@ -55,6 +56,11 @@ export const DEFAULT_TASK_LEASE_MS = 60_000;
  * serializa o processamento por conversa: enquanto há uma tarefa em
  * `processing` para a conversa, nenhuma outra é reclamada, preservando a
  * ordenação das respostas.
+ *
+ * Se houver uma escolha de sessão pendente para a conversa, tasks de
+ * agendamento não são reclamadas (apenas tasks `session_choice_*` podem
+ * prosseguir). Isso impede que uma task antiga de agendamento rode enquanto
+ * o cliente ainda não escolheu continuar/nova conversa.
  */
 async function claimNextTask({
 	leaseMs,
@@ -70,15 +76,27 @@ async function claimNextTask({
 		? sql`AND task."conversationId" = ${conversationId}`
 		: sql``;
 
+	// Se conversationId foi passado, verificar se há escolha pendente
+	// para decidir quais taskTypes bloquear.
+	let sessionChoicePending = false;
+	if (conversationId) {
+		const pending = await readPendingSessionChoice(conversationId);
+		sessionChoicePending = Boolean(pending);
+	}
+
+	// Task types de agendamento que devem ser bloqueados durante pendência
+	const schedulingTaskTypes = sql`('process_button_reply', 'send_consultant_preference_question', 'process_consultant_preference_reply', 'process_consultant_selection', 'send_confirmation_request')`;
+
 	const rows = (await db.execute(
 		sql`
     WITH candidate AS (
-      SELECT task."id"
+      SELECT task."id", task."taskType"
       FROM "autonomous_tasks" AS task
       WHERE task."status" = 'pending'
         AND task."availableAt" <= now()
         AND task."attempts" < task."maxAttempts"
         ${conversationFilter}
+        ${sessionChoicePending ? sql`AND task."taskType" NOT IN ${schedulingTaskTypes}` : sql``}
         AND NOT EXISTS (
           SELECT 1
           FROM "autonomous_tasks" AS other
